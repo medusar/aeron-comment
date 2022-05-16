@@ -22,7 +22,7 @@ import org.agrona.ExpandableArrayBuffer;
 import org.agrona.collections.ArrayUtil;
 
 import static io.aeron.cluster.ClusterSession.MAX_ENCODED_MEMBERSHIP_QUERY_LENGTH;
-
+//Publisher used for sending data to clients.
 class EgressPublisher
 {
     private static final int SEND_ATTEMPTS = 3;
@@ -35,6 +35,15 @@ class EgressPublisher
     private final NewLeaderEventEncoder newLeaderEventEncoder = new NewLeaderEventEncoder();
     private final AdminResponseEncoder adminResponseEncoder = new AdminResponseEncoder();
 
+    /**
+     * Send events to ClientSession.
+     * @param session  the ClientSession to receive the event.
+     * @param leadershipTermId
+     * @param leaderMemberId
+     * @param code
+     * @param detail
+     * @return
+     */
     boolean sendEvent(
         final ClusterSession session,
         final long leadershipTermId,

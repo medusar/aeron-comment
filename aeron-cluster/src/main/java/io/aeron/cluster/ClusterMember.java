@@ -963,6 +963,7 @@ public final class ClusterMember
     }
 
     /**
+     * null == member.vote todo: does it mean that every member has to vote ?
      * Has the candidate got unanimous support of the cluster?
      *
      * @param members         to check for votes.

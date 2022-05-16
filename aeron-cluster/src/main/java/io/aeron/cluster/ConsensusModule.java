@@ -1220,8 +1220,13 @@ public final class ConsensusModule implements AutoCloseable
         private int serviceStreamId = ClusteredServiceContainer.Configuration.serviceStreamId();
         private String snapshotChannel = Configuration.snapshotChannel();
         private int snapshotStreamId = Configuration.snapshotStreamId();
+
+        //the channel parameter for the consensus communication channel.
+        //default value: aeron:udp?term-length=64k
         private String consensusChannel = Configuration.consensusChannel();
+        //108
         private int consensusStreamId = Configuration.consensusStreamId();
+
         private String replicationChannel = Configuration.replicationChannel();
         private String followerCatchupChannel = Configuration.followerCatchupChannel();
         private String leaderArchiveControlChannel = Configuration.leaderArchiveControlChannel();

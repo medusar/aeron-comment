@@ -86,6 +86,7 @@ class ConsensusAdapter implements FragmentHandler, AutoCloseable
 
         switch (messageHeaderDecoder.templateId())
         {
+            //Position a follower has appended to their local log when canvassing for leadership.
             case CanvassPositionDecoder.TEMPLATE_ID:
                 canvassPositionDecoder.wrap(
                     buffer,
@@ -99,7 +100,7 @@ class ConsensusAdapter implements FragmentHandler, AutoCloseable
                     canvassPositionDecoder.leadershipTermId(),
                     canvassPositionDecoder.followerMemberId());
                 break;
-
+            //Request the vote from another member to become the cluster leader.
             case RequestVoteDecoder.TEMPLATE_ID:
                 requestVoteDecoder.wrap(
                     buffer,
@@ -114,6 +115,8 @@ class ConsensusAdapter implements FragmentHandler, AutoCloseable
                     requestVoteDecoder.candidateMemberId());
                 break;
 
+            //Response to a vote request from a follower to the candidate.
+            //Note: no matter a candidate gets voted or not, it will receive a Vote as a response.
             case VoteDecoder.TEMPLATE_ID:
                 voteDecoder.wrap(
                     buffer,
@@ -130,6 +133,7 @@ class ConsensusAdapter implements FragmentHandler, AutoCloseable
                     voteDecoder.vote() == BooleanType.TRUE);
                 break;
 
+            //A leader has been successfully elected and has begun a new term.
             case NewLeadershipTermDecoder.TEMPLATE_ID:
                 newLeadershipTermDecoder.wrap(
                     buffer,

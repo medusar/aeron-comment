@@ -45,12 +45,22 @@ import static io.aeron.cluster.client.AeronCluster.SESSION_HEADER_LENGTH;
 import static io.aeron.cluster.service.ClusteredServiceContainer.Configuration.*;
 import static org.agrona.concurrent.status.CountersReader.NULL_COUNTER_ID;
 
+/**
+ * ClusteredService Agent
+ * 1. Poll sessions related log through logAdapter, and decode messages and callback on ClusteredService.
+ * 2. Poll ServiceTerminationPosition every millisecond and JoinLog through serviceAdapter,
+ *  and callback on ClusteredServiceAgent itself.
+ * 3. Send messages like scheduleTimer, closeSession etc. to consensus-module through ConsensusModuleProxy.
+ */
 final class ClusteredServiceAgent implements Agent, Cluster, IdleStrategy
 {
     static final long MARK_FILE_UPDATE_INTERVAL_MS = TimeUnit.NANOSECONDS.toMillis(MARK_FILE_UPDATE_INTERVAL_NS);
 
     private volatile boolean isAbort;
+
+    //Flag indicates if current service is active.
     private boolean isServiceActive;
+
     private final int serviceId;
     private int memberId = NULL_VALUE;
     private long closeHandlerRegistrationId;
@@ -58,47 +68,89 @@ final class ClusteredServiceAgent implements Agent, Cluster, IdleStrategy
     private long terminationPosition = NULL_POSITION;
     private long markFileUpdateDeadlineMs;
     private long cachedTimeMs;
+
+    //time of the cluster, updated when a log message is called back from logAdapter.
     private long clusterTime;
+
+    //Log position current service has processed.
     private long logPosition = NULL_POSITION;
 
     private final IdleStrategy idleStrategy;
+
+    //MarkFile for the cluster, mainly used for updateActivityTimestamp and memberId in this class.
+    //update every 1 second. activityTimestamp will also be updated in ConsensusModuleAgent every 1 sec.
     private final ClusterMarkFile markFile;
+
     private final ClusteredServiceContainer.Context ctx;
+
     private final Aeron aeron;
+    //ClientConductor invoker.
     private final AgentInvoker aeronAgentInvoker;
+
+    //User implemented ClusteredService.
     private final ClusteredService service;
+
+    //To send messages to consensus-module.
     private final ConsensusModuleProxy consensusModuleProxy;
+    //To poll control messages from the consensus module.
     private final ServiceAdapter serviceAdapter;
+
     private final EpochClock epochClock;
+
     private final UnsafeBuffer headerBuffer = new UnsafeBuffer(
         new byte[Configuration.MAX_UDP_PAYLOAD_LENGTH - DataHeaderFlyweight.HEADER_LENGTH]);
     private final DirectBufferVector headerVector = new DirectBufferVector(headerBuffer, 0, SESSION_HEADER_LENGTH);
     private final SessionMessageHeaderEncoder sessionMessageHeaderEncoder = new SessionMessageHeaderEncoder();
+
+    //Store all the sessions.
     private final Long2ObjectHashMap<ContainerClientSession> sessionByIdMap = new Long2ObjectHashMap<>();
     private final Collection<ClientSession> unmodifiableClientSessions =
         new UnmodifiableClientSessionCollection(sessionByIdMap.values());
+
+    //To poll raft logs.
     private final BoundedLogAdapter logAdapter;
+
+    //Temporary variable to indicate where some method is called from.
     private String activeLifecycleCallbackName;
+
+    //Current commit position for the Raft log.
+    //Will be used for logAdapter.poll, so that polled raft logs will not exceed the commitPosition.
+    //This value will only be read here. It will be updated in consensus-module.
     private ReadableCounter commitPosition;
+
+    //Temporary variable indicates a new ActiveLogEvent need to be handled.
     private ActiveLogEvent activeLogEvent;
+
+    //Current role on the node.
     private Role role = Role.FOLLOWER;
     private TimeUnit timeUnit = null;
 
     ClusteredServiceAgent(final ClusteredServiceContainer.Context ctx)
     {
+
+        //to poll raft log
         logAdapter = new BoundedLogAdapter(this, ctx.logFragmentLimit());
+
         this.ctx = ctx;
 
         markFile = ctx.clusterMarkFile();
         aeron = ctx.aeron();
+
+        //Aeron ClientConductor, invoked every millisecond in #checkForClockTick.
         aeronAgentInvoker = ctx.aeron().conductorAgentInvoker();
+        //User implemented ClusteredService
         service = ctx.clusteredService();
         idleStrategy = ctx.idleStrategy();
+        //Each ClusteredService has an id, the default value is 0.
         serviceId = ctx.serviceId();
         epochClock = ctx.epochClock();
 
+        //This channel is used both for publishing to consensus-module and subscribing ServiceTerminationPosition related messages.
         final String channel = ctx.controlChannel();
+
+        //Communicating with consensus-module
         consensusModuleProxy = new ConsensusModuleProxy(aeron.addPublication(channel, ctx.consensusModuleStreamId()));
+        //poll ServiceTerminationPosition every millisecond and JoinLog through serviceAdapter
         serviceAdapter = new ServiceAdapter(aeron.addSubscription(channel, ctx.serviceStreamId()), this);
         sessionMessageHeaderEncoder.wrapAndApplyHeader(headerBuffer, 0, new MessageHeaderEncoder());
     }
@@ -106,9 +158,12 @@ final class ClusteredServiceAgent implements Agent, Cluster, IdleStrategy
     public void onStart()
     {
         closeHandlerRegistrationId = aeron.addCloseHandler(this::abort);
+
+        //get the commit position counter
         final CountersReader counters = aeron.countersReader();
         commitPosition = awaitCommitPositionCounter(counters, ctx.clusterId());
 
+        //Recover state based on cluster counters.
         recoverState(counters);
     }
 
@@ -153,20 +208,29 @@ final class ClusteredServiceAgent implements Agent, Cluster, IdleStrategy
         ctx.close();
     }
 
+    /**
+     * 1. checkForClockTick and pollServiceAdapter
+     * 2. poll logs through logAdapter
+     */
     public int doWork()
     {
         int workCount = 0;
 
         try
         {
+            //Try to:
+            //1. invoke aeron ClientConductor.doWork through aeronAgentInvoker
+            //2. update cluster markFile activityTime.
             if (checkForClockTick())
             {
+                //invoke serviceAdapter.poll() whose messages will be called back on this class.
                 pollServiceAdapter();
                 workCount += 1;
             }
 
             if (null != logAdapter.image())
             {
+                //Poll Raft logs up to commitPosition, whose messages will be called back on this class.
                 final int polled = logAdapter.poll(commitPosition.get());
                 workCount += polled;
 
@@ -336,6 +400,9 @@ final class ClusteredServiceAgent implements Agent, Cluster, IdleStrategy
         }
     }
 
+    //called back from ServiceAdapter
+    //JoinLog
+    //TODO: where is JoinLog message created and published?
     void onJoinLog(
         final long logPosition,
         final long maxLogPosition,
@@ -346,7 +413,9 @@ final class ClusteredServiceAgent implements Agent, Cluster, IdleStrategy
         final Cluster.Role role,
         final String logChannel)
     {
+        //
         logAdapter.maxLogPosition(logPosition);
+        //create activeLogEvent and other logic will be processed in `pollServiceAdapter`
         activeLogEvent = new ActiveLogEvent(
             logPosition,
             maxLogPosition,
@@ -358,38 +427,50 @@ final class ClusteredServiceAgent implements Agent, Cluster, IdleStrategy
             logChannel);
     }
 
+    //Called back from ServiceAdapter
+    //set the terminationPosition, and other logic will be processed in `pollServiceAdapter`
     void onServiceTerminationPosition(final long logPosition)
     {
         terminationPosition = logPosition;
     }
 
+    //Called back from logAdapter
+    //invoked when a message is received from client by consensus-module.
     void onSessionMessage(
         final long logPosition,
         final long clusterSessionId,
-        final long timestamp,
+        final long timestamp,    //timestamp in the consensus-module.
         final DirectBuffer buffer,
         final int offset,
         final int length,
         final Header header)
     {
+        //update logPosition and clusterTime
         this.logPosition = logPosition;
         clusterTime = timestamp;
+        //find the clientSession and invoke user implemented ClusteredService
         final ClientSession clientSession = sessionByIdMap.get(clusterSessionId);
 
         service.onSessionMessage(clientSession, timestamp, buffer, offset, length, header);
     }
 
+    //Called back from logAdapter
+    //invoked when a timer event is received
     void onTimerEvent(final long logPosition, final long correlationId, final long timestamp)
     {
+        //update logPosition and clusterTime
         this.logPosition = logPosition;
         clusterTime = timestamp;
+        //invoke user implemented ClusteredService
         service.onTimerEvent(correlationId, timestamp);
     }
 
+    //Called back from logAdapter
+    //invoked when a session is opened.
     void onSessionOpen(
-        final long leadershipTermId,
+        final long leadershipTermId, //the leader termid when connected
         final long logPosition,
-        final long clusterSessionId,
+        final long clusterSessionId,  //sessionId
         final long timestamp,
         final int responseStreamId,
         final String responseChannel,
@@ -416,6 +497,7 @@ final class ClusteredServiceAgent implements Agent, Cluster, IdleStrategy
         service.onSessionOpen(session, timestamp);
     }
 
+    //Called back from logAdapter
     void onSessionClose(
         final long leadershipTermId,
         final long logPosition,
@@ -438,6 +520,8 @@ final class ClusteredServiceAgent implements Agent, Cluster, IdleStrategy
         service.onSessionClose(session, timestamp, closeReason);
     }
 
+    //Called back from logAdapter
+    //ClusterActionRequest, for now, only SNAPSHOT is supported.
     void onServiceAction(
         final long leadershipTermId, final long logPosition, final long timestamp, final ClusterAction action)
     {
@@ -446,6 +530,8 @@ final class ClusteredServiceAgent implements Agent, Cluster, IdleStrategy
         executeAction(action, logPosition, leadershipTermId);
     }
 
+    //Called back from logAdapter
+    //invoked when a new leadership term is created
     void onNewLeadershipTermEvent(
         final long leadershipTermId,
         final long logPosition,
@@ -470,6 +556,7 @@ final class ClusteredServiceAgent implements Agent, Cluster, IdleStrategy
             clusterTime = timestamp;
             this.timeUnit = timeUnit;
 
+            //Invoke user implemented methods.
             service.onNewLeadershipTermEvent(
                 leadershipTermId,
                 logPosition,
@@ -482,6 +569,9 @@ final class ClusteredServiceAgent implements Agent, Cluster, IdleStrategy
         }
     }
 
+    //Called back from logAdapter
+    //invoked when a member join or quit the cluster.
+    //ChangeType: JOIN, QUIT.
     void onMembershipChange(
         final long logPosition, final long timestamp, final ChangeType changeType, final int memberId)
     {
@@ -494,6 +584,9 @@ final class ClusteredServiceAgent implements Agent, Cluster, IdleStrategy
         }
     }
 
+    //Called back from ServiceSnapshotLoader
+    //when a snapshot is loaded, it will recover all the sessions in the snapshot.
+    //this method will add all the sessions into sessionByIdMap.
     void addSession(
         final long clusterSessionId,
         final int responseStreamId,
@@ -614,11 +707,19 @@ final class ClusteredServiceAgent implements Agent, Cluster, IdleStrategy
         }
     }
 
+    //1. recover from counters, which means some state information is stored in counters,
+    // these counters should not be changed during restart.
+    //2. loadSnapshot based on counters.
+    //TODO: where are the counters saved ?
     private void recoverState(final CountersReader counters)
     {
         final int recoveryCounterId = awaitRecoveryCounter(counters);
+
+        //Read logPosition and clusterTime from counters.
         logPosition = RecoveryState.getLogPosition(counters, recoveryCounterId);
         clusterTime = RecoveryState.getTimestamp(counters, recoveryCounterId);
+
+        //Read leadership termId from counters
         final long leadershipTermId = RecoveryState.getLeadershipTermId(counters, recoveryCounterId);
         sessionMessageHeaderEncoder.leadershipTermId(leadershipTermId);
         isServiceActive = true;
@@ -626,12 +727,15 @@ final class ClusteredServiceAgent implements Agent, Cluster, IdleStrategy
         activeLifecycleCallbackName = "onStart";
         try
         {
+            //If there is leaderTermId, then load from snapshot
             if (NULL_VALUE != leadershipTermId)
             {
+                //load snapshot and invoke user implemented service
                 loadSnapshot(RecoveryState.getSnapshotRecordingId(counters, recoveryCounterId, serviceId));
             }
             else
             {
+                //Load without snapshot
                 service.onStart(this, null);
             }
         }
@@ -640,6 +744,7 @@ final class ClusteredServiceAgent implements Agent, Cluster, IdleStrategy
             activeLifecycleCallbackName = null;
         }
 
+        //to acknowledge the logPosition and clientId to consensus-module
         final long id = ackId++;
         idleStrategy.reset();
         while (!consensusModuleProxy.ack(logPosition, clusterTime, id, aeron.clientId(), serviceId))
@@ -668,8 +773,15 @@ final class ClusteredServiceAgent implements Agent, Cluster, IdleStrategy
         role(Role.FOLLOWER);
     }
 
+    //To join an active raft log:
+    //1. to set Image for logAdapter
+    //2. to change role and memberId based on ActiveLogEvent
+    //3. to disconnect or connect client sessions based on new role.
     private void joinActiveLog(final ActiveLogEvent activeLog)
     {
+        //If current node is not leader, then close all the connected client sessions.
+        //ClientSessions are only allowed to connect to leader node.
+        //Note: sessions will only be disconnected here but not removed yet. Removing is performed elsewhere.
         if (Role.LEADER != activeLog.role)
         {
             for (final ContainerClientSession session : sessionByIdMap.values())
@@ -678,9 +790,12 @@ final class ClusteredServiceAgent implements Agent, Cluster, IdleStrategy
             }
         }
 
+        //Subscribe to raft log with specified channel and streamId.
         Subscription logSubscription = aeron.addSubscription(activeLog.channel, activeLog.streamId);
         try
         {
+            //Wait for image to be ready.
+            //TODO: why need to wait ? how much time will it take?
             final Image image = awaitImage(activeLog.sessionId, logSubscription);
             if (image.joinPosition() != logPosition)
             {
@@ -688,16 +803,19 @@ final class ClusteredServiceAgent implements Agent, Cluster, IdleStrategy
                     "expectedPosition=" + logPosition + " joinPosition=" + image.joinPosition());
             }
 
+            //logPosition must be contiguous
             if (activeLog.logPosition != logPosition)
             {
                 throw new ClusterException("Cluster log must be contiguous for active log event: " +
                     "expectedPosition=" + logPosition + " eventPosition=" + activeLog.logPosition);
             }
 
+            //setup for the logAdapter
             logAdapter.image(image);
             logAdapter.maxLogPosition(activeLog.maxLogPosition);
             logSubscription = null;
 
+            //Acknowledge its logPosition to consensus-module. Retry until success.
             final long id = ackId++;
             idleStrategy.reset();
             while (!consensusModuleProxy.ack(activeLog.logPosition, clusterTime, id, NULL_VALUE, serviceId))
@@ -707,25 +825,34 @@ final class ClusteredServiceAgent implements Agent, Cluster, IdleStrategy
         }
         finally
         {
+            //TODO:
+            //Why close? Will Image still be available after subscription closed ?
             CloseHelper.quietClose(logSubscription);
         }
 
+        //Change this memberId to activeLog.memberId, and update markFile.
+        //That means, memberId could also be changed when cluster works.
         memberId = activeLog.memberId;
         markFile.memberId(memberId);
 
+        //If current role will leader, then reconnect all the client sessions.
         if (Role.LEADER == activeLog.role)
         {
             for (final ContainerClientSession session : sessionByIdMap.values())
             {
+                //ctx.isRespondingService() is normally true
+                //TODO: What does activeLog.isStartup means ?
                 if (ctx.isRespondingService() && !activeLog.isStartup)
                 {
                     session.connect(aeron);
                 }
 
+                //Reset close flags.
                 session.resetClosing();
             }
         }
 
+        //Change role to activeLog.role.
         role(activeLog.role);
     }
 
@@ -754,29 +881,36 @@ final class ClusteredServiceAgent implements Agent, Cluster, IdleStrategy
         return new ReadableCounter(counters, counterId);
     }
 
+    //load snapshot with given recordingId
     private void loadSnapshot(final long recordingId)
     {
         try (AeronArchive archive = AeronArchive.connect(ctx.archiveContext().clone()))
         {
             final String channel = ctx.replayChannel();
             final int streamId = ctx.replayStreamId();
+
+            //replay all the data in the recording to `replayChannel`
             final int sessionId = (int)archive.startReplay(recordingId, 0, NULL_VALUE, channel, streamId);
 
             final String replaySessionChannel = ChannelUri.addSessionId(channel, sessionId);
             try (Subscription subscription = aeron.addSubscription(replaySessionChannel, streamId))
             {
                 final Image image = awaitImage(sessionId, subscription);
+                //load States in from snapshot, mainly client sessions.
                 loadState(image, archive);
+                //invoke user implemented methods.
                 service.onStart(this, image);
             }
         }
     }
 
+    //load ClientSessions from snapshots
     private void loadState(final Image image, final AeronArchive archive)
     {
         final ServiceSnapshotLoader snapshotLoader = new ServiceSnapshotLoader(image, this);
         while (true)
         {
+            //poll and handle data from snapshots.
             final int fragments = snapshotLoader.poll();
             if (snapshotLoader.isDone())
             {
@@ -806,22 +940,35 @@ final class ClusteredServiceAgent implements Agent, Cluster, IdleStrategy
         timeUnit = snapshotLoader.timeUnit();
     }
 
+    //Called back from logAdapter to onServiceAction
     private long onTakeSnapshot(final long logPosition, final long leadershipTermId)
     {
+        //create a new publication each time a snapshot is to be taken.
+        //A new recording id will be created each time a snapshot is taken.
         try (AeronArchive archive = AeronArchive.connect(ctx.archiveContext().clone());
             ExclusivePublication publication = aeron.addExclusivePublication(
                 ctx.snapshotChannel(), ctx.snapshotStreamId()))
         {
+
             final String channel = ChannelUri.addSessionId(ctx.snapshotChannel(), publication.sessionId());
             archive.startRecording(channel, ctx.snapshotStreamId(), LOCAL, true);
+
             final CountersReader counters = aeron.countersReader();
             final int counterId = awaitRecordingCounter(publication.sessionId(), counters, archive);
+
+            //A new recording id will be created each time a snapshot is taken.
             final long recordingId = RecordingPos.getRecordingId(counters, counterId);
 
+            //Recording states into snapshot, mainly client sessions.
             snapshotState(publication, logPosition, leadershipTermId);
+
             checkForClockTick();
             archive.checkForErrorResponse();
+
+            //Invoke on user implemented service so that users can encode business info into snapshot.
             service.onTakeSnapshot(publication);
+
+            //Wait for the archive recording the catchup to the publication position.
             awaitRecordingComplete(recordingId, publication.position(), counters, counterId, archive);
 
             return recordingId;
@@ -857,6 +1004,7 @@ final class ClusteredServiceAgent implements Agent, Cluster, IdleStrategy
         }
     }
 
+    //Encode cluster state into snapshot, mainly client sesions.
     private void snapshotState(
         final ExclusivePublication publication, final long logPosition, final long leadershipTermId)
     {
@@ -877,7 +1025,10 @@ final class ClusteredServiceAgent implements Agent, Cluster, IdleStrategy
     {
         if (ClusterAction.SNAPSHOT == action)
         {
+            //do take snapshot, and return the recordingId for the snapshot archive recording.
             final long recordingId = onTakeSnapshot(logPosition, leadershipTermId);
+
+            //acknowledge the consensus-module with the recordingId.
             final long id = ackId++;
             idleStrategy.reset();
             while (!consensusModuleProxy.ack(logPosition, clusterTime, id, recordingId, serviceId))
@@ -901,6 +1052,14 @@ final class ClusteredServiceAgent implements Agent, Cluster, IdleStrategy
         return counterId;
     }
 
+    /**
+     * tick timer
+     *
+     * 1. invoke aeron ClientConductor through aeronAgentInvoker every 1 millisecond(by default)
+     * 2. update cluster markFile activityTime
+     *
+     * @return if timer task has been invoked.
+     */
     private boolean checkForClockTick()
     {
         if (isAbort || aeron.isClosed())
@@ -936,10 +1095,15 @@ final class ClusteredServiceAgent implements Agent, Cluster, IdleStrategy
         return false;
     }
 
+    //Poll from serviceAdapter
+    //Poll messages and handle activeLogEvent and terminationPosition related logic.
     private void pollServiceAdapter()
     {
+        //poll and callback on this class.
         serviceAdapter.poll();
 
+        //if activeLogEvent is created
+        //joinActiveLog
         if (null != activeLogEvent && null == logAdapter.image())
         {
             final ActiveLogEvent event = activeLogEvent;
@@ -947,6 +1111,8 @@ final class ClusteredServiceAgent implements Agent, Cluster, IdleStrategy
             joinActiveLog(event);
         }
 
+        //if terminationPosition is set and current logPosition reaches terminationPosition,
+        //then termination this Service.
         if (NULL_POSITION != terminationPosition && logPosition >= terminationPosition)
         {
             if (logPosition > terminationPosition)
@@ -959,10 +1125,14 @@ final class ClusteredServiceAgent implements Agent, Cluster, IdleStrategy
         }
     }
 
+    //Terminate current service.
+    //Will invoke user implemented ClusterService.onTerminate
     private void terminate(final boolean isTerminationExpected)
     {
+        //Change flag to false
         isServiceActive = false;
         activeLifecycleCallbackName = "onTerminate";
+
         try
         {
             service.onTerminate(this);
@@ -978,6 +1148,7 @@ final class ClusteredServiceAgent implements Agent, Cluster, IdleStrategy
 
         try
         {
+            //Acknowledge the consensus-module, this ack will not be guaranteed success.
             int attempts = 5;
             final long id = ackId++;
             while (!consensusModuleProxy.ack(logPosition, clusterTime, id, NULL_VALUE, serviceId))
@@ -995,6 +1166,9 @@ final class ClusteredServiceAgent implements Agent, Cluster, IdleStrategy
         }
 
         terminationPosition = NULL_VALUE;
+
+        //Throw ClusterTerminationException, which is a sub-class of  AgentTerminationException,
+        //will terminate the AgentRunner.
         throw new ClusterTerminationException(isTerminationExpected);
     }
 

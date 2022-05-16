@@ -29,8 +29,12 @@ import static io.aeron.logbuffer.FrameDescriptor.*;
  */
 final class BoundedLogAdapter implements ControlledFragmentHandler, AutoCloseable
 {
+    //max messages can be consumed in a single poll, Default value: 50.
     private final int fragmentLimit;
+
+    //max log position
     private long maxLogPosition;
+
     private Image image;
     private final ClusteredServiceAgent agent;
     private final BufferBuilder builder = new BufferBuilder();
@@ -120,6 +124,7 @@ final class BoundedLogAdapter implements ControlledFragmentHandler, AutoCloseabl
         return image;
     }
 
+    //Poll from raft logs with specified limit
     int poll(final long limit)
     {
         return image.boundedControlledPoll(this, limit, fragmentLimit);

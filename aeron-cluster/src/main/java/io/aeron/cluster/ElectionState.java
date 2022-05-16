@@ -30,6 +30,8 @@ public enum ElectionState
     INIT(0),
 
     /**
+     * The node is checking connectivity between nodes, which is used to ensure a successful election is possible.
+     * This also prevents leadership bouncing between nodes with partial connectivity - see Coracle: Evaluating Consensus at the Internet Edge
      * Canvass members for current state and to assess if a successful leadership attempt can be mounted.
      */
     CANVASS(1),
@@ -40,16 +42,19 @@ public enum ElectionState
     NOMINATE(2),
 
     /**
+     * It is a candidate, and it is waiting for vote result.
      * Await ballot outcome from members on candidacy for leadership.
      */
     CANDIDATE_BALLOT(3),
 
     /**
+     * It is a follower, and it has voted for a candidate, and waiting for result.
      * Await ballot outcome after voting for a candidate.
      */
     FOLLOWER_BALLOT(4),
 
     /**
+     * [Leader only] Leader is waiting for followers to replicate any missing log entries
      * Wait for followers to replicate any missing log entries to track commit position.
      */
     LEADER_LOG_REPLICATION(5),

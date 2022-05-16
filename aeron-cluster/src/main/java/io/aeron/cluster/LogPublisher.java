@@ -222,6 +222,16 @@ final class LogPublisher
         return false;
     }
 
+    /**
+     * Append a timer event into raft log.
+     *
+     * @param correlationId  the relationId that triggers the timer.
+     * @param leadershipTermId
+     * @param timestamp      current timestamp of the leader.
+     *                       Note: it is not the time when the task should be invoked,
+     *                       although under normal conditions they are relatively near each other.
+     * @return
+     */
     long appendTimer(final long correlationId, final long leadershipTermId, final long timestamp)
     {
         final int length = MessageHeaderEncoder.ENCODED_LENGTH + TimerEventEncoder.BLOCK_LENGTH;

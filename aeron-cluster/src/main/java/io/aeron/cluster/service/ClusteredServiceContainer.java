@@ -563,23 +563,48 @@ public final class ClusteredServiceContainer implements AutoCloseable
         private volatile int isConcluded;
 
         private int appVersion = SemanticVersion.compose(0, 0, 1);
+
+        //clusterId, default 0.
         private int clusterId = Configuration.clusterId();
+        //serviceId, default 0.
         private int serviceId = Configuration.serviceId();
+        //serviceName, default: clustered-service.
         private String serviceName = Configuration.serviceName();
+
+        //The channel used to receive the replayed cluster log and snapshot data.
+        //default: `aeron:ipc`
         private String replayChannel = Configuration.replayChannel();
+        // default value: 103
         private int replayStreamId = Configuration.replayStreamId();
+
+        //Default value is: aeron:ipc?term-length=128k
+        //Can be controlled by `aeron.cluster.control.channel`
+        //Channel use for bidirectional communications between the consensus module and services.
+        //See ClusteredServiceAgent.consensusModuleProxy and ClusteredServiceAgent.serviceAdapter
         private String controlChannel = Configuration.controlChannel();
+        //The stream id for communications from the services to the consensus module.
+        //default value: 105
         private int consensusModuleStreamId = Configuration.consensusModuleStreamId();
+        //The stream id for communications from the consensus module and to the services.
+        //default value: 104
         private int serviceStreamId = Configuration.serviceStreamId();
+
+        //The channel for snapshot recording, to send the snapshot data to.
         private String snapshotChannel = Configuration.snapshotChannel();
+        //The stream id for snapshot recording.
+        //default value: 106
         private int snapshotStreamId = Configuration.snapshotStreamId();
+
         private int errorBufferLength = Configuration.errorBufferLength();
         private boolean isRespondingService = Configuration.isRespondingService();
         private int logFragmentLimit = Configuration.logFragmentLimit();
 
         private CountDownLatch abortLatch;
         private ThreadFactory threadFactory;
+        //Idle strategy for ClusteredServiceAgent.
+        //Default: BackoffIdleStrategy.
         private Supplier<IdleStrategy> idleStrategySupplier;
+
         private EpochClock epochClock;
         private DistinctErrorLog errorLog;
         private ErrorHandler errorHandler;
@@ -587,7 +612,10 @@ public final class ClusteredServiceContainer implements AutoCloseable
         private AtomicCounter errorCounter;
         private CountedErrorHandler countedErrorHandler;
         private AeronArchive.Context archiveContext;
+
+        //directory to save clustered service data. mainly for `clusterd-mark-service-{serviceId}.dat`
         private String clusterDirectoryName = Configuration.clusterDirName();
+
         private File clusterDir;
         private String aeronDirectoryName = CommonContext.getAeronDirectoryName();
         private Aeron aeron;

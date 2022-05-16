@@ -58,6 +58,10 @@ import static io.aeron.cluster.service.ClusteredServiceContainer.Configuration.M
 import static io.aeron.exceptions.AeronException.Category.WARN;
 import static java.lang.Math.min;
 
+/**
+ * ConsensusModuleAgent
+ *
+ */
 final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
 {
     static final long SLOW_TICK_INTERVAL_NS = TimeUnit.MILLISECONDS.toNanos(10);
@@ -82,6 +86,8 @@ final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
     private long timeOfLastAppendPositionUpdateNs = 0;
     private long timeOfLastAppendPositionSendNs = 0;
     private long slowTickDeadlineNs = 0;
+
+    //periodically update markFile activityTimestamp
     private long markFileUpdateDeadlineNs = 0;
     private int pendingServiceMessageHeadOffset = 0;
     private int uncommittedServiceMessages = 0;
@@ -90,18 +96,26 @@ final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
     private int pendingMemberRemovals = 0;
     private long logPublicationChannelTag;
     private ReadableCounter appendPosition = null;
+
+    //The Raft commitPosition, this value will be read by ClusteredServiceAgent to control raft log polling.
     private final Counter commitPosition;
+
     private ConsensusModule.State state = ConsensusModule.State.INIT;
     private Cluster.Role role = Cluster.Role.FOLLOWER;
     private ClusterMember[] activeMembers;
     private ClusterMember[] passiveMembers = ClusterMember.EMPTY_MEMBERS;
     private ClusterMember leaderMember;
     private ClusterMember thisMember;
+
     private long[] rankedPositions;
     private final long[] serviceClientIds;
     private final ArrayDeque<ServiceAck>[] serviceAckQueues;
     private final Counter clusterRoleCounter;
+
+    //ClusterMarkFile, for updateActivityTimestamp in this class, update every 1 second.
+    //activityTimestamp will also be updated in ClusteredServiceAgent.
     private final ClusterMarkFile markFile;
+
     private final AgentInvoker aeronClientInvoker;
     private final ClusterClock clusterClock;
     private final LongConsumer clusterTimeConsumer;
@@ -113,14 +127,25 @@ final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
     private final ServiceProxy serviceProxy;
     private final IngressAdapter ingressAdapter;
     private final EgressPublisher egressPublisher;
+
+    //To publish log to the cluster
     private final LogPublisher logPublisher;
+    //
     private final LogAdapter logAdapter;
+
+    //Adapter used for poll messages of consensus from nodes in the cluster.
     private final ConsensusAdapter consensusAdapter;
+
     private final ConsensusPublisher consensusPublisher = new ConsensusPublisher();
     private final Long2ObjectHashMap<ClusterSession> sessionByIdMap = new Long2ObjectHashMap<>();
     private final ArrayList<ClusterSession> pendingSessions = new ArrayList<>();
+
+    //To store all the ClientSessions that has be rejected
+    //Clients will be rejected if error occurs or some other reasons, they will all be stored in rejectedSessions.
     private final ArrayList<ClusterSession> rejectedSessions = new ArrayList<>();
+    //To store all the ClientSessions that have connected but need to be redirected to leader.
     private final ArrayList<ClusterSession> redirectSessions = new ArrayList<>();
+
     private final Int2ObjectHashMap<ClusterMember> clusterMemberByIdMap = new Int2ObjectHashMap<>();
     private final Long2LongCounterMap expiredTimerCountByCorrelationIdMap = new Long2LongCounterMap(0);
     private final ArrayDeque<ClusterSession> uncommittedClosedSessions = new ArrayDeque<>();
@@ -141,8 +166,12 @@ final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
     private final RecordingLog recordingLog;
     private final ArrayList<RecordingLog.Snapshot> dynamicJoinSnapshots = new ArrayList<>();
     private RecordingLog.RecoveryPlan recoveryPlan;
+
+    //local archive to communicate with Archive.
     private AeronArchive archive;
+    //to poll recording errors and events.
     private RecordingSignalPoller recordingSignalPoller;
+
     private Election election;
     private DynamicJoin dynamicJoin;
     private ClusterTermination clusterTermination;
@@ -192,16 +221,20 @@ final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
         thisMember = ClusterMember.determineMember(activeMembers, ctx.clusterMemberId(), ctx.memberEndpoints());
         leaderMember = thisMember;
 
+        //the channel parameter for the consensus communication channel.
         final ChannelUri consensusUri = ChannelUri.parse(ctx.consensusChannel());
         if (!consensusUri.containsKey(ENDPOINT_PARAM_NAME))
         {
             consensusUri.put(ENDPOINT_PARAM_NAME, thisMember.consensusEndpoint());
         }
 
+        //Sub
         consensusAdapter = new ConsensusAdapter(
             aeron.addSubscription(consensusUri.toString(), ctx.consensusStreamId()), this);
 
+        //IngressAdapter, used for receive client session requests and messages.
         ingressAdapter = new IngressAdapter(ctx.ingressFragmentLimit(), this);
+
         logAdapter = new LogAdapter(this, ctx.logFragmentLimit());
 
         consensusModuleAdapter = new ConsensusModuleAdapter(
@@ -253,7 +286,9 @@ final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
      */
     public void onStart()
     {
+        //create local archive
         archive = AeronArchive.connect(ctx.archiveContext().clone());
+        //create RecordingSignalPoller
         recordingSignalPoller = new RecordingSignalPoller(
             archive.controlSessionId(), archive.controlResponsePoller().subscription());
 
@@ -321,18 +356,21 @@ final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
      */
     public int doWork()
     {
+        //get current system timestamp.
         final long timestamp = clusterClock.time();
         final long nowNs = clusterTimeUnit.toNanos(timestamp);
         int workCount = 0;
 
         try
         {
+            //invoke every 10ms
             if (nowNs >= slowTickDeadlineNs)
             {
                 slowTickDeadlineNs = nowNs + SLOW_TICK_INTERVAL_NS;
                 workCount += slowTickWork(nowNs);
             }
 
+            //poll consensusAdapter to handle election related messages between nodes.
             workCount += consensusAdapter.poll();
 
             if (null != dynamicJoin)
@@ -341,6 +379,7 @@ final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
             }
             else if (null != election)
             {
+                //If election is in progress, do election work
                 workCount += election.doWork(nowNs);
             }
             else
@@ -559,8 +598,16 @@ final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
         }
     }
 
+    /**
+     * Called back from TimerService which will be called from `consensusWork()`
+     * This method will be called when a timer task should be invoked.
+     * @param correlationId of the timer.  This correlationId is the one that triggers the timer.
+     * @return true if successfully append it to logs otherwise false.
+     *  If true is returned, this task will be removed, otherwise it will be retried.
+     */
     public boolean onTimerEvent(final long correlationId)
     {
+        //Append timer into logs, the timestamp is retrieved from `clusterClock.time()`
         final long appendPosition = logPublisher.appendTimer(correlationId, leadershipTermId, clusterClock.time());
         if (appendPosition > 0)
         {
@@ -572,12 +619,17 @@ final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
         return false;
     }
 
+    //Called back from ConsensusAdapter
+    // To handle CanvassPosition messages, and create a publication if the follower does not have one.
+    // CANVASS: The node is checking connectivity between nodes, which is used to ensure a successful election is possible.
+    // This means a follower is canvassing for leadership.
     void onCanvassPosition(
         final long logLeadershipTermId,
         final long logPosition,
         final long leadershipTermId,
         final int followerMemberId)
     {
+        //if the follower does not have a publication connected then add a publication to the follower.
         checkFollowerForConsensusPublication(followerMemberId);
 
         if (null != election)
@@ -587,6 +639,8 @@ final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
         else if (Cluster.Role.LEADER == role)
         {
             final ClusterMember follower = clusterMemberByIdMap.get(followerMemberId);
+            //if logLeadershipTermId from follower is less than or equal to current leadershipTermId
+            //send a newLeadershipTerm message to this follower with its own logLeadershipTermId.
             if (null != follower && logLeadershipTermId <= this.leadershipTermId)
             {
                 final RecordingLog.Entry currentTermEntry = recordingLog.getTermEntry(this.leadershipTermId);
@@ -611,6 +665,7 @@ final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
                     nextLogPosition = NULL_POSITION;
                 }
 
+                //TODO: why use logLeadershipTermId instead of this.leadershipTermId ?
                 consensusPublisher.newLeadershipTerm(
                     follower.publication(),
                     logLeadershipTermId,
@@ -629,9 +684,19 @@ final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
         }
     }
 
+    /**
+     * Called back from ConsensusAdapter
+     * Requested by a candidate to vote for its leadership.
+     * @param logLeadershipTermId
+     * @param logPosition
+     * @param candidateTermId  termId by the candidate.
+     * @param candidateId
+     */
     void onRequestVote(
         final long logLeadershipTermId, final long logPosition, final long candidateTermId, final int candidateId)
     {
+        //If an election is in progress, handle in the election process.
+        //If candidateTermId is greater than current leadershipTermId, then enter election stage.
         if (null != election)
         {
             election.onRequestVote(logLeadershipTermId, logPosition, candidateTermId, candidateId);
@@ -643,6 +708,8 @@ final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
         }
     }
 
+    //Called back from ConsensusAdapter.
+    //invoked when a RequestVote response is received.
     void onVote(
         final long candidateTermId,
         final long logLeadershipTermId,
@@ -658,6 +725,8 @@ final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
         }
     }
 
+    //Called back from ConsensusAdapter.
+    //A leader has been successfully elected and has begun a new term.
     void onNewLeadershipTerm(
         final long logLeadershipTermId,
         final long nextLeadershipTermId,
@@ -1452,24 +1521,31 @@ final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
     {
         final long logPublicationTag = aeron.nextCorrelationId();
         logPublicationChannelTag = aeron.nextCorrelationId();
-        final ChannelUri channelUri = ChannelUri.parse(ctx.logChannel());
 
+        // set up log publication
+        final ChannelUri channelUri = ChannelUri.parse(ctx.logChannel());
+        //add alias name
         channelUri.put(ALIAS_PARAM_NAME, "log");
+        //add tags
         channelUri.put(TAGS_PARAM_NAME, logPublicationChannelTag + "," + logPublicationTag);
 
+        //If use udp as log channel
         if (channelUri.isUdp())
         {
+            //Use min as flow control strategy if no one specified.
             if (!channelUri.containsKey(FLOW_CONTROL_PARAM_NAME))
             {
                 final long timeout = TimeUnit.NANOSECONDS.toSeconds(ctx.leaderHeartbeatTimeoutNs());
                 channelUri.put(FLOW_CONTROL_PARAM_NAME, "min,t:" + timeout + "s");
             }
 
+            //if use mdc, then set mdc control mode to: manual
             if (ctx.isLogMdc())
             {
                 channelUri.put(MDC_CONTROL_MODE_PARAM_NAME, MDC_CONTROL_MODE_MANUAL);
             }
 
+            //If there is only one member in the cluster, set ssc = true
             channelUri.put(SPIES_SIMULATE_CONNECTION_PARAM_NAME, Boolean.toString(activeMembers.length == 1));
         }
 
@@ -1483,6 +1559,7 @@ final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
         {
             ensureConsistentInitialTermId(channelUri);
         }
+
 
         final String channel = channelUri.toString();
         final ExclusivePublication publication = aeron.addExclusivePublication(channel, ctx.logStreamId());
@@ -1912,6 +1989,7 @@ final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
 
         if (null != archive)
         {
+            //poll archive events
             final RecordingSignalPoller poller = this.recordingSignalPoller;
             workCount += poller.poll();
 
@@ -1919,6 +1997,7 @@ final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
             {
                 final int templateId = poller.templateId();
 
+                //if there is error in control response, handle errors
                 if (ControlResponseDecoder.TEMPLATE_ID == templateId && poller.code() == ControlResponseCode.ERROR)
                 {
                     for (final ClusterMember member : activeMembers)
@@ -1948,22 +2027,25 @@ final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
                         election.handleError(clusterClock.timeNanos(), ex);
                     }
                 }
-                else if (RecordingSignalEventDecoder.TEMPLATE_ID == templateId)
+                else if (RecordingSignalEventDecoder.TEMPLATE_ID == templateId) //handle RecordingSignalEvent
                 {
                     final long recordingId = poller.recordingId();
                     final long position = poller.recordingPosition();
                     final RecordingSignal signal = poller.recordingSignal();
 
+                    //if log recording is stopped, update logRecordedPosition to recorded position.
                     if (RecordingSignal.STOP == signal && recordingId == logRecordingId)
                     {
                         this.logRecordedPosition = position;
                     }
 
+                    //if there is an election in progress, let election handle onRecordingSignal.
                     if (null != election)
                     {
                         election.onRecordingSignal(poller.correlationId(), recordingId, position, signal);
                     }
 
+                    //if there is dynamicJoin in progress, let dynamicJoin handle onRecordingSignal.
                     if (null != dynamicJoin)
                     {
                         dynamicJoin.onRecordingSignal(poller.correlationId(), recordingId, position, signal);
@@ -2092,9 +2174,22 @@ final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
         ingressEndpoints = ClusterMember.ingressEndpoints(activeMembers);
     }
 
+    /**
+     * slow tick work
+     * 1. invoke aeron ClientConductor.doWork.
+     * 2. update ClusterMarkFile.activityTimestamp every 1 second.
+     * 3. poll archive errors and recording signals and handle respectively.
+     * 4. handle client session redirection and rejection.
+     * 5. handle election tasks if election is in progress.
+     *
+     * @param nowNs current timestamp in nano seconds.
+     * @return workCount
+     */
     private int slowTickWork(final long nowNs)
     {
+        // invoke aeron ClientConductor.doWork
         int workCount = aeronClientInvoker.invoke();
+
         if (aeron.isClosed())
         {
             throw new AgentTerminationException("unexpected Aeron close");
@@ -2105,6 +2200,7 @@ final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
         }
         else if (isElectionRequired)
         {
+            //enter election stage when election is required.
             if (null == election)
             {
                 enterElection();
@@ -2112,16 +2208,21 @@ final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
             isElectionRequired = false;
         }
 
+        //update cluster markFile timestamp periodically
         if (nowNs >= markFileUpdateDeadlineNs)
         {
             markFileUpdateDeadlineNs = nowNs + MARK_FILE_UPDATE_INTERVAL_NS;
             markFile.updateActivityTimestamp(clusterClock.timeMillis());
         }
 
+        //poll archive errors and recording signals and handle respectively.
         workCount += pollArchiveEvents();
+        //redirect client to leaders
         workCount += sendRedirects(redirectSessions, nowNs);
+        //send errors to clients
         workCount += sendRejections(rejectedSessions, nowNs);
 
+        //If an election is in progress, handle election related tasks.
         if (null == election)
         {
             if (Cluster.Role.LEADER == role)
@@ -2164,6 +2265,14 @@ final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
         return workCount;
     }
 
+    /**
+     * If current node is Leader:
+     * 1. poll timer tasks and append it into log
+     * 2.
+     * @param timestamp now in milliseconds.
+     * @param nowNs     now in nanoseconds.
+     * @return
+     */
     private int consensusWork(final long timestamp, final long nowNs)
     {
         int workCount = 0;
@@ -2172,6 +2281,7 @@ final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
         {
             if (ConsensusModule.State.ACTIVE == state)
             {
+                //poll timer tasks and
                 workCount += timerService.poll(timestamp);
                 workCount += pendingServiceMessages.forEach(
                     pendingServiceMessageHeadOffset, serviceSessionMessageAppender, SERVICE_MESSAGE_LIMIT);
@@ -2354,6 +2464,16 @@ final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
         return workCount;
     }
 
+    /**
+     * Send errors to clients.
+     * Remove ClientSession from redirectSessions if any of the conditions match:
+     * 1) Errors has been sent successfully
+     * 2) ClientSession has been timed out.
+     * 3) ClientSession is not in a valid state.
+     * @param rejectedSessions
+     * @param nowNs
+     * @return
+     */
     private int sendRejections(final ArrayList<ClusterSession> rejectedSessions, final long nowNs)
     {
         int workCount = 0;
@@ -2378,6 +2498,17 @@ final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
         return workCount;
     }
 
+    /**
+     * Send redirect to clientSessions to tell them to reconnect to leader node.
+     * Remove ClientSession from redirectSessions if any of the conditions match:
+     * 1) Redirect has been sent successfully
+     * 2) ClientSession has been timed out.
+     * 3) ClientSession is not in a valid state.
+     *
+     * @param redirectSessions
+     * @param nowNs
+     * @return
+     */
     private int sendRedirects(final ArrayList<ClusterSession> redirectSessions, final long nowNs)
     {
         int workCount = 0;
@@ -2932,6 +3063,12 @@ final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
         }
     }
 
+    /**
+     * Enter an election stage.
+     * 1. change current node into Follower.
+     * 2. create Election
+     * 3. invoke Election.doWork
+     */
     private void enterElection()
     {
         if (null != election)
@@ -2939,6 +3076,7 @@ final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
             throw new IllegalStateException("election in progress");
         }
 
+        //Make current node a follower
         role(Cluster.Role.FOLLOWER);
 
         election = new Election(

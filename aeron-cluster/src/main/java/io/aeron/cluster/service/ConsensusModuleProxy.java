@@ -141,6 +141,15 @@ public final class ConsensusModuleProxy implements AutoCloseable
         return result;
     }
 
+    /**
+     * Acknowledge the consensus-module with current logPosition and relevantId.
+     * @param logPosition the log position a service has processed.
+     * @param timestamp clusterTime of the log.
+     * @param ackId
+     * @param relevantId depends on the action. if it is a takeSnapshot action,then the relevantId is the recordingId for the snapshot.
+     * @param serviceId  id for the user implemented ClusteredService.
+     * @return
+     */
     boolean ack(
         final long logPosition, final long timestamp, final long ackId, final long relevantId, final int serviceId)
     {
@@ -152,6 +161,7 @@ public final class ConsensusModuleProxy implements AutoCloseable
             final long result = publication.tryClaim(length, bufferClaim);
             if (result > 0)
             {
+                //Service acknowledging that it has reached a position.
                 serviceAckEncoder
                     .wrapAndApplyHeader(bufferClaim.buffer(), bufferClaim.offset(), messageHeaderEncoder)
                     .logPosition(logPosition)

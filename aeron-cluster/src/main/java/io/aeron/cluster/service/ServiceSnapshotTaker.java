@@ -30,6 +30,7 @@ final class ServiceSnapshotTaker extends SnapshotTaker
         super(publication, idleStrategy, aeronClientInvoker);
     }
 
+    //Encode ClientSession info into snapshot
     void snapshotSession(final ClientSession session)
     {
         final String responseChannel = session.responseChannel();

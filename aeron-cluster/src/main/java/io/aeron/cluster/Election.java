@@ -70,7 +70,10 @@ class Election
     private long logLeadershipTermId;
     private long candidateTermId;
     private ClusterMember leaderMember = null;
+
+    //Current state of the election, default value is INIT.
     private ElectionState state = INIT;
+
     private Subscription logSubscription = null;
     private LogReplay logReplay = null;
     private ClusterMember[] clusterMembers;
@@ -119,6 +122,8 @@ class Election
         Objects.requireNonNull(thisMember);
         ctx.electionStateCounter().setOrdered(INIT.code());
 
+        //If there is only one member and this member is the only one member.
+        //enter into LEADER_LOG_REPLICATION state.
         if (clusterMembers.length == 1 && thisMember.id() == clusterMembers[0].id())
         {
             candidateTermId = max(leadershipTermId + 1, ctx.clusterMarkFile().candidateTermId() + 1);
@@ -167,6 +172,7 @@ class Election
                 workCount += nominate(nowNs);
                 break;
 
+                //Current node is candidate, and it is wait for followers to vote.
             case CANDIDATE_BALLOT:
                 workCount += candidateBallot(nowNs);
                 break;
@@ -175,10 +181,11 @@ class Election
                 workCount += followerBallot(nowNs);
                 break;
 
+            //Wait for followers to replicate missing logs.
             case LEADER_LOG_REPLICATION:
                 workCount += leaderLogReplication(nowNs);
                 break;
-
+            // Leader is replaying the local log
             case LEADER_REPLAY:
                 workCount += leaderReplay(nowNs);
                 break;
@@ -272,6 +279,9 @@ class Election
         }
     }
 
+    //CANVASS
+    //The node is checking connectivity between nodes, which is used to ensure a successful election is possible.
+    //Position a follower has appended to their local log when canvassing for leadership.
     void onCanvassPosition(
         final long logLeadershipTermId,
         final long logPosition,
@@ -286,10 +296,14 @@ class Election
         final ClusterMember follower = clusterMemberByIdMap.get(followerMemberId);
         if (null != follower && thisMember.id() != followerMemberId)
         {
+            //update local variables with new information.
             follower
                 .leadershipTermId(logLeadershipTermId)
                 .logPosition(logPosition);
 
+            //if logLeadershipTermId from follower is less than current leadershipTermId,
+            // and a leader has been elected, then publishNewLeadershipTerm with follower's logLeadershipTermId.
+            // and send the result to the follower
             if (logLeadershipTermId < this.leadershipTermId)
             {
                 switch (state)
@@ -302,6 +316,7 @@ class Election
                         break;
                 }
             }
+            //If the follower has a more recent termId than leader, then this may be an error.
             else if (logLeadershipTermId > this.leadershipTermId)
             {
                 switch (state)
@@ -314,6 +329,13 @@ class Election
         }
     }
 
+    /**
+     * Requested by a candidate to vote for its leadership.
+     * @param logLeadershipTermId
+     * @param logPosition
+     * @param candidateTermId
+     * @param candidateId
+     */
     void onRequestVote(
         final long logLeadershipTermId, final long logPosition, final long candidateTermId, final int candidateId)
     {
@@ -322,31 +344,49 @@ class Election
             return;
         }
 
+        //passive member does not participate in election.
         if (isPassiveMember() || candidateId == thisMember.id())
         {
             return;
         }
 
+        //if candidateTermId is less than this.candidateTermId, do not vote for it.
         if (candidateTermId <= this.candidateTermId)
         {
+            //send back vote result to the candidate without voting for it.
             placeVote(candidateTermId, candidateId, false);
         }
+        // if current leader has more recent log, do not vote for it.
         else if (compareLog(this.logLeadershipTermId, appendPosition, logLeadershipTermId, logPosition) > 0)
         {
             this.candidateTermId = ctx.clusterMarkFile().proposeMaxCandidateTermId(
                 candidateTermId, ctx.fileSyncLevel());
+            //send back vote result to the candidate without voting for it.
             placeVote(candidateTermId, candidateId, false);
+            //enter into INIT state
             state(INIT, ctx.clusterClock().timeNanos());
         }
+        //if candidateTermId is greater and current state is in any of below, then vote for it.
         else if (CANVASS == state || NOMINATE == state || CANDIDATE_BALLOT == state || FOLLOWER_BALLOT == state)
         {
             this.candidateTermId = ctx.clusterMarkFile().proposeMaxCandidateTermId(
                 candidateTermId, ctx.fileSyncLevel());
+            //vote for it
             placeVote(candidateTermId, candidateId, true);
+            //then enter into FOLLOWER_BALLOT state.
             state(FOLLOWER_BALLOT, ctx.clusterClock().timeNanos());
         }
     }
 
+    /**
+     * When a RequestVote response is received.
+     * @param candidateTermId
+     * @param logLeadershipTermId
+     * @param logPosition
+     * @param candidateMemberId
+     * @param followerMemberId   the followerId that send the response.
+     * @param vote
+     */
     void onVote(
         final long candidateTermId,
         final long logLeadershipTermId,
@@ -360,10 +400,14 @@ class Election
             return;
         }
 
+        //If current node is the candidate that requests for vote,
+        //and current state is CANDIDATE_BALLOT(wait for followers to vote)
+        //then update the follower with vote result.
         if (CANDIDATE_BALLOT == state &&
             candidateTermId == this.candidateTermId &&
             candidateMemberId == thisMember.id())
         {
+            //update vote result of the follower.
             final ClusterMember follower = clusterMemberByIdMap.get(followerMemberId);
             if (null != follower)
             {
@@ -681,20 +725,28 @@ class Election
         return 0;
     }
 
+    //Check if current node has won the votes.
     private int candidateBallot(final long nowNs)
     {
         int workCount = 0;
 
+        //If all followers have voted for this member, or majority members have voted for this member
+        //then this member becomes the leader and enter into `LEADER_LOG_REPLICATION` state.
+        //Note: todo: does it mean that all the followers have to vote ?
         if (ClusterMember.hasWonVoteOnFullCount(clusterMembers, candidateTermId) ||
             ClusterMember.hasMajorityVoteWithCanvassMembers(clusterMembers, candidateTermId))
         {
+            //set current member as leader, and its termId as leader termId.
             leaderMember = thisMember;
             leadershipTermId = candidateTermId;
+            //enter LEADER_LOG_REPLICATION state, and wait for followers to replicate missing logs.
             state(LEADER_LOG_REPLICATION, nowNs);
             workCount++;
         }
+        //If election timeout occurs, default timeout: 1s.
         else if (nowNs >= (timeOfLastStateChangeNs + ctx.electionTimeoutNs()))
         {
+            //If the majority of the members have voted for this member, it wins the election.
             if (ClusterMember.hasMajorityVote(clusterMembers, candidateTermId))
             {
                 leaderMember = thisMember;
@@ -703,6 +755,7 @@ class Election
             }
             else
             {
+                //otherwise, go back to CANVASS state, and wait for another round of election.
                 state(CANVASS, nowNs);
             }
 
@@ -710,6 +763,8 @@ class Election
         }
         else
         {
+            // Some members have not been sent with RequestVote,  and the election has not timed out,
+            // then send a RequestVote to this follower.
             for (final ClusterMember member : clusterMembers)
             {
                 if (!member.isBallotSent())
@@ -1115,6 +1170,12 @@ class Election
         }
     }
 
+    /**
+     * to tell the member that a leader has been successfully elected and has begun a new term.
+     * @param member
+     * @param logLeadershipTermId
+     * @param timestamp
+     */
     private void publishNewLeadershipTerm(
         final ClusterMember member, final long logLeadershipTermId, final long timestamp)
     {
