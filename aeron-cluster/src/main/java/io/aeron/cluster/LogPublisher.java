@@ -122,6 +122,9 @@ final class LogPublisher
         }
     }
 
+    /**
+     * Publish message with IPC to local and manual mdc to remote peers.
+     */
     long appendMessage(
         final long leadershipTermId,
         final long clusterSessionId,

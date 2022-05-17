@@ -1210,8 +1210,13 @@ public final class ConsensusModule implements AutoCloseable
         private boolean isIpcIngressAllowed = Configuration.isIpcIngressAllowed();
         private int ingressFragmentLimit = Configuration.ingressFragmentLimit();
         private String egressChannel = AeronCluster.Configuration.egressChannel();
+
+        //logChannel used for publish raft logs,
+        //default value: aeron:udp?term-length=64m
         private String logChannel = Configuration.logChannel();
+        //default: 100
         private int logStreamId = Configuration.logStreamId();
+
         private String memberEndpoints = Configuration.memberEndpoints();
         private String replayChannel = ClusteredServiceContainer.Configuration.replayChannel();
         private int replayStreamId = ClusteredServiceContainer.Configuration.replayStreamId();

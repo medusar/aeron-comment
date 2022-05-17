@@ -402,19 +402,20 @@ final class ClusteredServiceAgent implements Agent, Cluster, IdleStrategy
 
     //called back from ServiceAdapter
     //JoinLog
-    //TODO: where is JoinLog message created and published?
+    //When consensus module joint a log, it sends a message.
     void onJoinLog(
         final long logPosition,
         final long maxLogPosition,
         final int memberId,
-        final int logSessionId,
+        final int logSessionId, //the publication.sessionId for log Publication.
         final int logStreamId,
         final boolean isStartup,
         final Cluster.Role role,
         final String logChannel)
     {
-        //
+        //the logPosition the consensus module has consumed.
         logAdapter.maxLogPosition(logPosition);
+
         //create activeLogEvent and other logic will be processed in `pollServiceAdapter`
         activeLogEvent = new ActiveLogEvent(
             logPosition,

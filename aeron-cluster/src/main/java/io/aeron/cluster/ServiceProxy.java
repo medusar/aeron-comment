@@ -48,6 +48,7 @@ final class ServiceProxy implements AutoCloseable
         CloseHelper.close(publication);
     }
 
+    //tell the service that the node has joint a log.
     void joinLog(
         final long logPosition,
         final long maxLogPosition,

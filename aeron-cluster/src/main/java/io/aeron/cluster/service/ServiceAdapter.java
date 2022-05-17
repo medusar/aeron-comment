@@ -69,6 +69,7 @@ final class ServiceAdapter implements AutoCloseable
                     messageHeaderDecoder.blockLength(),
                     messageHeaderDecoder.version());
 
+                //the consensus module has successfully joint a log.
                 clusteredServiceAgent.onJoinLog(
                     joinLogDecoder.logPosition(),
                     joinLogDecoder.maxLogPosition(),

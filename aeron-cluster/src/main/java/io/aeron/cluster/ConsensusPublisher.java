@@ -224,6 +224,8 @@ final class ConsensusPublisher
         while (--attempts > 0);
     }
 
+    //A follower tell leader its commit position.
+    //if this method returns false, the follower will retry later until it succeeds.
     boolean appendPosition(
         final ExclusivePublication publication,
         final long leadershipTermId,
@@ -263,6 +265,7 @@ final class ConsensusPublisher
         return false;
     }
 
+    //The leader tell a follower its commit position.
     void commitPosition(
         final ExclusivePublication publication,
         final long leadershipTermId,

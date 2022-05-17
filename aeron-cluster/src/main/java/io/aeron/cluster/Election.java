@@ -53,14 +53,21 @@ class Election
     private boolean isFirstInit = true;
     private boolean isLeaderStartup;
     private boolean isExtendedCanvass;
+
+    //sessionId is the publication.sessionId, where publication is the mdc pub in leader, used for publishing raft logs
+    //to followers. See: ConsensusModuleAgent.addLogPublication()
     private int logSessionId = NULL_SESSION_ID;
+
     private long timeOfLastStateChangeNs;
     private long timeOfLastUpdateNs;
     private long timeOfLastCommitPositionUpdateNs;
     private final long initialTimeOfLastUpdateNs;
     private long nominationDeadlineNs;
+
+    //position current node has consumed.
     private long logPosition;
     private long appendPosition;
+
     private long catchupJoinPosition = NULL_POSITION;
     private long catchupCommitPosition = 0;
     private long replicationLeadershipTermId = NULL_VALUE;
@@ -182,6 +189,8 @@ class Election
                 break;
 
             //Wait for followers to replicate missing logs.
+            //In this state:
+            //1) create log mdc publication
             case LEADER_LOG_REPLICATION:
                 workCount += leaderLogReplication(nowNs);
                 break;
@@ -190,6 +199,7 @@ class Election
                 workCount += leaderReplay(nowNs);
                 break;
 
+                //After leader reply, it turns into LEADER_INIT.
             case LEADER_INIT:
                 workCount += leaderInit(nowNs);
                 break;
@@ -825,6 +835,7 @@ class Election
 
         if (null == logReplay)
         {
+            //if current consumed logPosition is less than appendPosition
             if (logPosition < appendPosition)
             {
                 logReplay = consensusModuleAgent.newLogReplay(logPosition, appendPosition);
@@ -858,6 +869,7 @@ class Election
 
     private int leaderInit(final long nowNs)
     {
+        //join as leader
         consensusModuleAgent.joinLogAsLeader(leadershipTermId, logPosition, logSessionId, isLeaderStartup);
         updateRecordingLog(nowNs);
         state(LEADER_READY, nowNs);
