@@ -97,8 +97,12 @@ final class ClusteredServiceAgent implements Agent, Cluster, IdleStrategy
 
     private final EpochClock epochClock;
 
+    private final UnsafeBuffer messageBuffer = new UnsafeBuffer(
+        new byte[Configuration.MAX_UDP_PAYLOAD_LENGTH]);
     private final UnsafeBuffer headerBuffer = new UnsafeBuffer(
-        new byte[Configuration.MAX_UDP_PAYLOAD_LENGTH - DataHeaderFlyweight.HEADER_LENGTH]);
+        messageBuffer,
+        DataHeaderFlyweight.HEADER_LENGTH,
+        Configuration.MAX_UDP_PAYLOAD_LENGTH - DataHeaderFlyweight.HEADER_LENGTH);
     private final DirectBufferVector headerVector = new DirectBufferVector(headerBuffer, 0, SESSION_HEADER_LENGTH);
     private final SessionMessageHeaderEncoder sessionMessageHeaderEncoder = new SessionMessageHeaderEncoder();
 
@@ -669,7 +673,8 @@ final class ClusteredServiceAgent implements Agent, Cluster, IdleStrategy
                     "claim exceeds maxPayloadLength=" + maxPayloadLength + ", length=" + length);
             }
 
-            bufferClaim.wrap(headerBuffer, 0, length + SESSION_HEADER_LENGTH);
+            bufferClaim.wrap(
+                messageBuffer, 0, DataHeaderFlyweight.HEADER_LENGTH + SESSION_HEADER_LENGTH + length);
             return ClientSession.MOCKED_OFFER;
         }
 
@@ -678,7 +683,7 @@ final class ClusteredServiceAgent implements Agent, Cluster, IdleStrategy
             return Publication.NOT_CONNECTED;
         }
 
-        final long offset = publication.tryClaim(length + SESSION_HEADER_LENGTH, bufferClaim);
+        final long offset = publication.tryClaim(SESSION_HEADER_LENGTH + length, bufferClaim);
         if (offset > 0)
         {
             sessionMessageHeaderEncoder
