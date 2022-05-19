@@ -50,7 +50,13 @@ public final class ClusterMember
     private long changeCorrelationId = Aeron.NULL_VALUE;
     private long removalPosition = NULL_POSITION;
     private long logPosition = NULL_POSITION;
+
+    //last time when appendPosition message is received from the member.
+    //if no appendPosition message for more than leaderHeartbeatTimeoutNs,
+    // then it will not be counted as an active follower for current leader.
+    //See: ClusterMember.hasActiveQuorum.
     private long timeOfLastAppendPositionNs = Aeron.NULL_VALUE;
+
     private ExclusivePublication publication;
     private String consensusChannel;
     private final String consensusEndpoint;

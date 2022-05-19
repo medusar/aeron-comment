@@ -36,6 +36,9 @@ import static io.aeron.logbuffer.FrameDescriptor.FRAME_ALIGNMENT;
 import static io.aeron.protocol.DataHeaderFlyweight.HEADER_LENGTH;
 import static org.agrona.BitUtil.align;
 
+/**
+ * publish log to service module by IPC and other nodes in the clusters with MDC.
+ */
 final class LogPublisher
 {
     private static final int SEND_ATTEMPTS = 3;
@@ -190,6 +193,7 @@ final class LogPublisher
         return result;
     }
 
+    //append SessionClose message into raft log.
     boolean appendSessionClose(
         final int memberId,
         final ClusterSession session,

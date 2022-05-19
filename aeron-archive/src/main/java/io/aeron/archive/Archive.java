@@ -822,8 +822,10 @@ public final class Archive implements AutoCloseable
         private int segmentFileLength = Configuration.segmentFileLength();
         private int fileSyncLevel = Configuration.fileSyncLevel();
         private int catalogFileSyncLevel = Configuration.catalogFileSyncLevel();
+
         private int maxConcurrentRecordings = Configuration.maxConcurrentRecordings();
         private int maxConcurrentReplays = Configuration.maxConcurrentReplays();
+
         private int fileIoMaxLength = Configuration.fileIoMaxLength();
 
         private ArchiveThreadingMode threadingMode = Configuration.threadingMode();

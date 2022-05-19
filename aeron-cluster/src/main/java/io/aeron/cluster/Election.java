@@ -879,13 +879,19 @@ class Election
 
     private int leaderReady(final long nowNs)
     {
+
+        //publish leader commit position to followers.
         int workCount = consensusModuleAgent.updateLeaderPosition(nowNs, appendPosition);
+        //publish new term leadership if timeouts
+        //Note: todo： the difference between consensusPublisher.newLeadershipTerm vs consensusModuleAgent.appendNewLeadershipTermEvent?
         workCount += publishNewLeadershipTermOnInterval(nowNs);
 
         if (ClusterMember.hasVotersAtPosition(clusterMembers, logPosition, leadershipTermId) ||
             (nowNs >= (timeOfLastStateChangeNs + ctx.leaderHeartbeatTimeoutNs()) &&
             ClusterMember.hasQuorumAtPosition(clusterMembers, logPosition, leadershipTermId)))
         {
+            //send NewLeadershipTermEvent to service module and other nodes.
+            //if failed will retry because the state is still LEADER_READY.
             if (consensusModuleAgent.appendNewLeadershipTermEvent(nowNs))
             {
                 consensusModuleAgent.electionComplete(nowNs);

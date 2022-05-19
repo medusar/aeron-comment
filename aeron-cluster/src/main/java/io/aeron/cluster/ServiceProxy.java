@@ -132,6 +132,7 @@ final class ServiceProxy implements AutoCloseable
         throw new ClusterException("failed to send cluster members response: result=" + result);
     }
 
+    //Send cluster members information to service module.
     void clusterMembersExtendedResponse(
         final long correlationId,
         final long currentTimeNs,

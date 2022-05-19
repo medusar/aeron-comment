@@ -332,10 +332,12 @@ final class ClusteredServiceAgent implements Agent, Cluster, IdleStrategy
         return logPosition;
     }
 
+    //Implements scheduleTimer method of Cluster.
     public boolean scheduleTimer(final long correlationId, final long deadline)
     {
         checkForLifecycleCallback();
 
+        //Send scheduleTimer message to consensus module.
         return consensusModuleProxy.scheduleTimer(correlationId, deadline);
     }
 
@@ -440,7 +442,7 @@ final class ClusteredServiceAgent implements Agent, Cluster, IdleStrategy
     }
 
     //Called back from logAdapter
-    //invoked when a message is received from client by consensus-module.
+    //invoked when a message is received from client by consensus-module from IngressAdapter.
     void onSessionMessage(
         final long logPosition,
         final long clusterSessionId,
@@ -460,7 +462,7 @@ final class ClusteredServiceAgent implements Agent, Cluster, IdleStrategy
     }
 
     //Called back from logAdapter
-    //invoked when a timer event is received
+    //invoked when a timer task is triggered, message is sent from consensus module in `consensusWork()`
     void onTimerEvent(final long logPosition, final long correlationId, final long timestamp)
     {
         //update logPosition and clusterTime
@@ -502,7 +504,7 @@ final class ClusteredServiceAgent implements Agent, Cluster, IdleStrategy
         service.onSessionOpen(session, timestamp);
     }
 
-    //Called back from logAdapter
+    //Called back from logAdapter, the message  is sent from consensus-module(ConsensusModuleAgent)
     void onSessionClose(
         final long leadershipTermId,
         final long logPosition,
@@ -512,6 +514,7 @@ final class ClusteredServiceAgent implements Agent, Cluster, IdleStrategy
     {
         this.logPosition = logPosition;
         clusterTime = timestamp;
+        //remove session from the map.
         final ContainerClientSession session = sessionByIdMap.remove(clusterSessionId);
 
         if (null == session)
@@ -521,12 +524,16 @@ final class ClusteredServiceAgent implements Agent, Cluster, IdleStrategy
                 " leadershipTermId=" + leadershipTermId + " logPosition=" + logPosition);
         }
 
+        //close the publication.
         session.disconnect(ctx.countedErrorHandler());
+        //callback to notify ClusterService.
         service.onSessionClose(session, timestamp, closeReason);
     }
 
     //Called back from logAdapter
-    //ClusterActionRequest, for now, only SNAPSHOT is supported.
+    //ClusterActionRequest, for ClusteredServiceAgent, only SNAPSHOT is supported.
+    //message is sent from ConsensusModuleAgent, which supports other actions,
+    // See: ConsensusModuleAgent.checkControlToggle
     void onServiceAction(
         final long leadershipTermId, final long logPosition, final long timestamp, final ClusterAction action)
     {
@@ -536,7 +543,7 @@ final class ClusteredServiceAgent implements Agent, Cluster, IdleStrategy
     }
 
     //Called back from logAdapter
-    //invoked when a new leadership term is created
+    //invoked when a new leadership term is created, message sent from consensus module.
     void onNewLeadershipTermEvent(
         final long leadershipTermId,
         final long logPosition,
@@ -583,6 +590,7 @@ final class ClusteredServiceAgent implements Agent, Cluster, IdleStrategy
         this.logPosition = logPosition;
         clusterTime = timestamp;
 
+        //only handles QUIT here, to terminate this member and service.
         if (memberId == this.memberId && changeType == ChangeType.QUIT)
         {
             terminate(true);
@@ -951,6 +959,8 @@ final class ClusteredServiceAgent implements Agent, Cluster, IdleStrategy
     {
         //create a new publication each time a snapshot is to be taken.
         //A new recording id will be created each time a snapshot is taken.
+        //Note: a new AeronArchive is created each time a snapshot is taken.
+        //This is different from ConsensusModuleAgent, which create one AeronArchive and keep that one for later use.
         try (AeronArchive archive = AeronArchive.connect(ctx.archiveContext().clone());
             ExclusivePublication publication = aeron.addExclusivePublication(
                 ctx.snapshotChannel(), ctx.snapshotStreamId()))

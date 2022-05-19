@@ -24,6 +24,9 @@ import io.aeron.logbuffer.ControlledFragmentHandler;
 import io.aeron.logbuffer.Header;
 import org.agrona.DirectBuffer;
 
+/**
+ * Used for polling messages from service module (ClusteredServiceAgent)
+ */
 final class ConsensusModuleAdapter implements AutoCloseable
 {
     private static final int FRAGMENT_LIMIT = 10;

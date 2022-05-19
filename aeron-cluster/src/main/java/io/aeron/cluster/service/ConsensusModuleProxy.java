@@ -210,6 +210,7 @@ public final class ConsensusModuleProxy implements AutoCloseable
 
     /**
      * Query for the current cluster members.
+     * This method is called from ClusterTool.
      *
      * @param correlationId for the request.
      * @return true of the request was successfully sent, otherwise false.

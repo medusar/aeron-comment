@@ -26,6 +26,7 @@ import static io.aeron.logbuffer.FrameDescriptor.*;
 
 /**
  * Adapter for reading a log with an upper-bound applied beyond which the consumer cannot progress.
+ * the messages are sent from consensus module (ConsensusModuleAgent)
  */
 final class BoundedLogAdapter implements ControlledFragmentHandler, AutoCloseable
 {

@@ -845,6 +845,7 @@ public final class DriverConductor implements Agent
         for (int i = 0, size = ipcPublications.size(); i < size; i++)
         {
             final IpcPublication publication = ipcPublications.get(i);
+            //if multiple matches, it will be called multiple times?
             if (subscriptionLink.matches(publication) && publication.isAcceptingSubscriptions())
             {
                 clientProxy.onAvailableImage(

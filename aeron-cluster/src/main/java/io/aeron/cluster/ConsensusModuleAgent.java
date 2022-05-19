@@ -78,7 +78,11 @@ final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
     private long logServiceSessionId = Long.MIN_VALUE;
     private long leadershipTermId = NULL_VALUE;
     private long expectedAckPosition = 0;
+
+    //serviceAckId, which increases once a ack message has been handled successfully,
+    //By successfully, it means the ServiceAck has been reached by all services.
     private long serviceAckId = 0;
+
     private long terminationPosition = NULL_POSITION;
     private long notifiedCommitPosition = 0;
     private long lastAppendPosition = 0;
@@ -93,7 +97,10 @@ final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
     private int uncommittedServiceMessages = 0;
     private int memberId;
     private int highMemberId;
+
+    //increases when a removeMember request is sent by ClusterTool.
     private int pendingMemberRemovals = 0;
+
     private long logPublicationChannelTag;
 
     // The position of the recording position, the recording is created based on logSessionId,
@@ -124,6 +131,10 @@ final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
     private long[] rankedPositions;
 
     private final long[] serviceClientIds;
+
+    //Dequeue to store ServiceAck received from service module,
+    // an Ack message contains the logPosition the service module has processed.
+    // the index of the serviceAckQueues array is the serviceId, which means each service has its own Dequeue.
     private final ArrayDeque<ServiceAck>[] serviceAckQueues;
     private final Counter clusterRoleCounter;
 
@@ -138,6 +149,9 @@ final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
     private final TimerService timerService;
     private final Counter moduleState;
     private final Counter controlToggle;
+
+    //To receive consensus related messages from service module.
+    //Note: this is different from ConsensusAdapter, which responses for polling consensus messages from other nodes.
     private final ConsensusModuleAdapter consensusModuleAdapter;
     private final ServiceProxy serviceProxy;
     private final IngressAdapter ingressAdapter;
@@ -155,6 +169,10 @@ final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
 
     private final ConsensusPublisher consensusPublisher = new ConsensusPublisher();
     private final Long2ObjectHashMap<ClusterSession> sessionByIdMap = new Long2ObjectHashMap<>();
+
+    //after a client's CONNECT message is received via ingressAdapter.poll,
+    // a session is created and added into `pendingSessions`,
+    // the pendingSessions will be processed in `slowTickWork()`.
     private final ArrayList<ClusterSession> pendingSessions = new ArrayList<>();
 
     //To store all the ClientSessions that has be rejected
@@ -164,7 +182,10 @@ final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
     private final ArrayList<ClusterSession> redirectSessions = new ArrayList<>();
 
     private final Int2ObjectHashMap<ClusterMember> clusterMemberByIdMap = new Int2ObjectHashMap<>();
+
+    //Count of expired timer task.
     private final Long2LongCounterMap expiredTimerCountByCorrelationIdMap = new Long2LongCounterMap(0);
+
     private final ArrayDeque<ClusterSession> uncommittedClosedSessions = new ArrayDeque<>();
 
     private final LongArrayQueue uncommittedTimers = new LongArrayQueue(Long.MAX_VALUE);
@@ -252,15 +273,17 @@ final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
             consensusUri.put(ENDPOINT_PARAM_NAME, thisMember.consensusEndpoint());
         }
 
-        //Sub
+        //To receive consensus related messages from others nodes.
         consensusAdapter = new ConsensusAdapter(
             aeron.addSubscription(consensusUri.toString(), ctx.consensusStreamId()), this);
 
         //IngressAdapter, used for receive client session requests and messages.
         ingressAdapter = new IngressAdapter(ctx.ingressFragmentLimit(), this);
 
+        //only useful when current node is follower. poll raft log from leader.
         logAdapter = new LogAdapter(this, ctx.logFragmentLimit());
 
+        //To receive consensus module related messages from service module.
         consensusModuleAdapter = new ConsensusModuleAdapter(
             aeron.addSubscription(ctx.controlChannel(), ctx.consensusModuleStreamId()), this);
         serviceProxy = new ServiceProxy(aeron.addPublication(ctx.controlChannel(), ctx.serviceStreamId()));
@@ -489,6 +512,7 @@ final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
             else
             {
                 authenticator.onConnectRequest(session.id(), encodedCredentials, clusterTimeUnit.toMillis(now));
+
                 //add session into pending sessions and wait to be handled in `consensusWork()`
                 pendingSessions.add(session);
             }
@@ -1043,6 +1067,7 @@ final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
         final String responseChannel,
         final byte[] encodedCredentials)
     {
+        //works only when there is no election or dynamicJoin in progress.
         if (null == election && null == dynamicJoin)
         {
             if (Cluster.Role.LEADER != role)
@@ -1083,10 +1108,14 @@ final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
         }
     }
 
+    //Called back from ConsensusModuleAdapter to remove a member from cluster.
+    //This is invoked form `ClusterTool.removeMember()`
     void onRemoveMember(final int memberId, final boolean isPassive)
     {
+        //works only when current node is leader and there is no election in progress.
         if (null == election && Cluster.Role.LEADER == role)
         {
+            //works only when the member is found by memberId.
             final ClusterMember member = clusterMemberByIdMap.get(memberId);
             if (null != member)
             {
@@ -1102,6 +1131,8 @@ final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
                 }
                 else
                 {
+                    //If not passive member
+                    //append event to raft log
                     final long now = clusterClock.time();
                     final long position = logPublisher.appendMembershipChangeEvent(
                         leadershipTermId,
@@ -1112,6 +1143,9 @@ final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
                         memberId,
                         ClusterMember.encodeAsString(ClusterMember.removeMember(activeMembers, memberId)));
 
+                    //If append successfully, update member's removalPosition and increase pendingMemberRemovals.
+                    //If append failed, then there will be no retrying.
+                    //The real removal action is in `updateLeaderPosition`
                     if (position > 0)
                     {
                         timeOfLastLogUpdateNs = clusterTimeUnit.toNanos(now) - leaderHeartbeatIntervalNs;
@@ -1123,10 +1157,14 @@ final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
         }
     }
 
+    //Called back from ConsensusModuleAdapter to query cluster members.
+    //This is invoked from `ClusterTool.queryClusterMembers()`
     void onClusterMembersQuery(final long correlationId, final boolean isExtendedRequest)
     {
+        //Default is true
         if (isExtendedRequest)
         {
+            //send responses to service via ServiceProxy
             serviceProxy.clusterMembersExtendedResponse(
                 correlationId, clusterClock.timeNanos(), leaderMember.id(), memberId, activeMembers, passiveMembers);
         }
@@ -1234,62 +1272,92 @@ final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
         return lastAppendPosition;
     }
 
+    //Called back from ConsensusModuleAdapter
+    //Invoked only when `ClusteredServiceAgent.close()` method is called, in which all client sessions will be close.
     void onServiceCloseSession(final long clusterSessionId)
     {
         final ClusterSession session = sessionByIdMap.get(clusterSessionId);
         if (null != session)
         {
+            //update close reason
             session.closing(CloseReason.SERVICE_ACTION);
 
+            //if current node is leader,
+            //and appendSessionClose message successfully
             if (Cluster.Role.LEADER == role && logPublisher.appendSessionClose(
                 memberId, session, leadershipTermId, clusterClock.time(), clusterClock.timeUnit()))
             {
+                //Sent close event to the session, with SERVICE_ACTION message.
                 final String msg = CloseReason.SERVICE_ACTION.name();
                 egressPublisher.sendEvent(session, leadershipTermId, memberId, EventCode.CLOSED, msg);
+                 //update closed log position
                 session.closedLogPosition(logPublisher.position());
+
+                //add current session into uncommittedClosedSessions for latter process.
                 uncommittedClosedSessions.addLast(session);
+                //remove session from the msp.
                 sessionByIdMap.remove(clusterSessionId);
+                //remove related publication.
                 session.close(aeron, ctx.countedErrorHandler());
             }
         }
     }
 
+    //Called back from ConsensusModuleAdapter,
+    //invoked when a message is offered from ClusterService.
     void onServiceMessage(final long leadershipTermId, final DirectBuffer buffer, final int offset, final int length)
     {
         if (leadershipTermId == this.leadershipTermId)
         {
+            //append this message into pendingServiceMessages, throws exception if capacity limit is reached.
             enqueueServiceSessionMessage((MutableDirectBuffer)buffer, offset, length, nextServiceSessionId++);
         }
     }
 
+    //Called back from ConsensusModuleAdapter and ConsensusModuleSnapshotLoader
+    //invoked when scheduleTimer is called from Cluster or snapshot.
     void onScheduleTimer(final long correlationId, final long deadline)
     {
+        //If there is no expired timer task in current correlationId, schedule the task in timerService.
         if (expiredTimerCountByCorrelationIdMap.get(correlationId) == 0)
         {
             timerService.scheduleTimerForCorrelationId(correlationId, deadline);
         }
         else
         {
+            // decrease the expired timer task count, but do not schedule the task.
+            // todo: why ?
             expiredTimerCountByCorrelationIdMap.decrementAndGet(correlationId);
         }
     }
 
+    //Called back from ConsensusModuleAdapter
+    //invoked when cancelTimer is called from Cluster.
     void onCancelTimer(final long correlationId)
     {
+        //just delegate to timerService.
         timerService.cancelTimerByCorrelationId(correlationId);
     }
 
+    //Called back from ConsensusModuleAdapter
+    //invoked when an ACK is sent from service module to acknowledge its logPosition.
     void onServiceAck(
         final long logPosition, final long timestamp, final long ackId, final long relevantId, final int serviceId)
     {
+        //store the ServiceAck into ArrayDequeue.
         captureServiceAck(logPosition, ackId, relevantId, serviceId);
 
+        //Check if all the services has acknowledged its logPosition.
         if (ServiceAck.hasReached(logPosition, serviceAckId, serviceAckQueues))
         {
+
+            //If current is in SNAPSHOT state, and service module has finished snapshot and sent back ack.
             if (ConsensusModule.State.SNAPSHOT == state)
             {
                 final ServiceAck[] serviceAcks = pollServiceAcks(logPosition, serviceId);
                 ++serviceAckId;
+
+                //take snapshot for raft log
                 takeSnapshot(timestamp, logPosition, serviceAcks);
 
                 if (null != clusterTermination)
@@ -1348,6 +1416,8 @@ final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
         }
     }
 
+    //Called back from LogAdapter.
+    //todo
     void onReplayTimerEvent(final long correlationId)
     {
         if (!timerService.cancelTimerByCorrelationId(correlationId))
@@ -1758,13 +1828,18 @@ final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
 
         //wait for service module to ack this position
         expectedAckPosition = logPosition;
-        //wait if service module has acked this position.
+        //wait if all service module has acked this position.
+        //Note: if there is more than one ClusterServices, then it will wait for all the services to ack this position.
         while (!ServiceAck.hasReached(logPosition, serviceAckId, serviceAckQueues))
         {
+            //poll so that ServiceAck messages could be received and put into `serviceAckQueues`.
             idle(consensusModuleAdapter.poll());
         }
 
+        //remove the first ServiceAck messages in every service.
         ServiceAck.removeHead(serviceAckQueues);
+
+        //increase ackId for the next ack.
         ++serviceAckId;
     }
 
@@ -1841,6 +1916,8 @@ final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
             ctx.appVersion());
     }
 
+    //Called back from Election.
+    //when election is completed.
     void electionComplete(final long nowNs)
     {
         leadershipTermId = election.leadershipTermId();
@@ -2306,14 +2383,20 @@ final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
         {
             if (Cluster.Role.LEADER == role)
             {
+                //Check ControlToggle
                 workCount += checkControlToggle(nowNs);
 
                 if (ConsensusModule.State.ACTIVE == state)
                 {
+                    //process pending sessions, to change CONNECT sessions to OPEN sessions.
                     workCount += processPendingSessions(pendingSessions, nowNs);
+                    //check session liveliness, close if timeouts.
                     workCount += checkSessions(sessionByIdMap, nowNs);
+                    //todo: passive members
                     workCount += processPassiveMembers(passiveMembers);
 
+                    // Check if the cluster leader has an active quorum of cluster followers.
+                    // If not, enter election stage.
                     if (!ClusterMember.hasActiveQuorum(activeMembers, nowNs, leaderHeartbeatTimeoutNs))
                     {
                         ctx.countedErrorHandler().onError(new ClusterEvent("inactive follower quorum"));
@@ -2407,12 +2490,13 @@ final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
             workCount += updateFollowerPosition(nowNs);
         }
 
-
+        //to poll messages from service module.
         workCount += consensusModuleAdapter.poll();
 
         return workCount;
     }
 
+    //Check ClusterControl by state.
     private int checkControlToggle(final long nowNs)
     {
         switch (ClusterControl.ToggleState.get(controlToggle))
@@ -2433,6 +2517,8 @@ final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
                 break;
 
             case SNAPSHOT:
+                //1. append snapshot action to raft log
+                //2. set consensus module state to SNAPSHOT
                 if (ConsensusModule.State.ACTIVE == state && appendAction(ClusterAction.SNAPSHOT))
                 {
                     state(ConsensusModule.State.SNAPSHOT);
@@ -2478,10 +2564,13 @@ final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
         return logPublisher.appendClusterAction(leadershipTermId, clusterClock.time(), action);
     }
 
+    //handle pendingSessions,
+    //pendingSessions
     private int processPendingSessions(final ArrayList<ClusterSession> pendingSessions, final long nowNs)
     {
         int workCount = 0;
 
+        //process from the last one to the first one.
         for (int lastIndex = pendingSessions.size() - 1, i = lastIndex; i >= 0; i--)
         {
             final ClusterSession session = pendingSessions.get(i);
@@ -2536,6 +2625,9 @@ final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
                         workCount += 1;
                     }
                 }
+                //If a session is open, append SessionOpen event to raft log,
+                // and remove it from pendingSessions, and add it into sessionByIdMap.
+                //If append SessionOpen failed, it will be rechecked later.
                 else if (appendSessionAndOpen(session, nowNs))
                 {
                     ArrayListUtil.fastUnorderedRemove(pendingSessions, i, lastIndex--);
@@ -2670,6 +2762,12 @@ final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
         return workCount;
     }
 
+    //check all OPEN sessions
+    //1) close a open session if it timeouts.
+    //2) handle CLOSING sessions.
+    //Note: If a session timeouts, its state then becomes CLOSING, if appendSessionClose successfully,
+    //then its state becomes CLOSED, it appendSessionClose failed,
+    // a CLOSING state session will be rechecked until  appendSessionClose succeeds.
     private int checkSessions(final Long2ObjectHashMap<ClusterSession> sessionByIdMap, final long nowNs)
     {
         int workCount = 0;
@@ -2684,6 +2782,7 @@ final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
                 {
                     session.closing(CloseReason.TIMEOUT);
 
+                    //appendSessionClose to tell service module and other nodes.
                     if (logPublisher.appendSessionClose(
                         memberId, session, leadershipTermId, clusterClock.time(), clusterClock.timeUnit()))
                     {
@@ -2982,12 +3081,16 @@ final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
         }
     }
 
+    //Remove activeMembers
     private void handleMemberRemovals(final long commitPosition)
     {
         ClusterMember[] members = activeMembers;
 
         for (final ClusterMember member : activeMembers)
         {
+            //If a member has removalPosition set, and its removalPosition is less than current commitPosition,
+            //then it will be removed.
+            //Which means sometimes a removal action may fail because of the removePosition.
             if (member.hasRequestedRemove() && member.removalPosition() <= commitPosition)
             {
                 if (member.id() == memberId)
@@ -3059,6 +3162,7 @@ final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
             clearUncommittedEntriesTo(commitPosition);
 
             //Remove members if there is pending members to be removed.
+            //member removal is only invoked from ClusterTool.removeMember for now.
             if (pendingMemberRemovals > 0)
             {
                 handleMemberRemovals(commitPosition);
@@ -3251,19 +3355,26 @@ final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
         }
     }
 
+    //take raft log snapshot
+    //after service snapshot has been taken and service module has sent back serviceAck.
     private void takeSnapshot(final long timestamp, final long logPosition, final ServiceAck[] serviceAcks)
     {
         final long recordingId;
         try (ExclusivePublication publication = aeron.addExclusivePublication(
             ctx.snapshotChannel(), ctx.snapshotStreamId()))
         {
+            //start recording the publication
             final String channel = ChannelUri.addSessionId(ctx.snapshotChannel(), publication.sessionId());
             archive.startRecording(channel, ctx.snapshotStreamId(), LOCAL, true);
+
+            //find the recording position counter for the recording.
             final CountersReader counters = aeron.countersReader();
             final int counterId = awaitRecordingCounter(counters, publication.sessionId());
             recordingId = RecordingPos.getRecordingId(counters, counterId);
 
             snapshotState(publication, logPosition, leadershipTermId);
+
+            //wait for the recording position to reach the publication position
             awaitRecordingComplete(recordingId, publication.position(), counters, counterId);
         }
         catch (final ArchiveException ex)
