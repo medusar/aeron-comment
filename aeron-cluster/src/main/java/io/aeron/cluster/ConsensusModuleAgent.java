@@ -161,7 +161,7 @@ final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
     private final LogPublisher logPublisher;
 
     //logAdapter, image will only be set if current node is follower
-    //so, if current node is leader, this logAdapter is useless when logApapter.poll().
+    //so, if current node is leader, this logAdapter is useless when logAdapter.poll().
     private final LogAdapter logAdapter;
 
     //Adapter used for poll messages of consensus from nodes in the cluster.
@@ -191,6 +191,7 @@ final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
     private final LongArrayQueue uncommittedTimers = new LongArrayQueue(Long.MAX_VALUE);
 
     private final ExpandableRingBuffer pendingServiceMessages = new ExpandableRingBuffer();
+
     private final ExpandableRingBuffer.MessageConsumer serviceSessionMessageAppender =
         this::serviceSessionMessageAppender;
     private final ExpandableRingBuffer.MessageConsumer leaderServiceSessionMessageSweeper =
@@ -1402,22 +1403,35 @@ final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
         }
     }
 
+    //Called back from LogAdapter, where the raft log is replayed from an old position,
+    //and a sessionMessage is received.
     void onReplaySessionMessage(final long clusterSessionId, final long timestamp)
     {
+
         final ClusterSession clusterSession = sessionByIdMap.get(clusterSessionId);
         if (null == clusterSession)
         {
+            //if the session does not exist, then
+            //TODO:
             logServiceSessionId = clusterSessionId;
             pendingServiceMessages.consume(followerServiceSessionMessageSweeper, Integer.MAX_VALUE);
         }
         else
         {
+            //if current session exists, then just update its activityTime by the time in the log
+            //Note: the timestamp is the time in the raft logs, not current timestamp.
             clusterSession.timeOfLastActivityNs(clusterTimeUnit.toNanos(timestamp));
         }
     }
 
-    //Called back from LogAdapter.
-    //todo
+    //Called back from LogAdapter, where the raft log is replayed from an old position,
+    // and a TimerEvent is received.
+    //Note: because timeEvent is already in the log, so just cancel it from the timer.
+    //when the timerEvent is triggered for the first time, it will be appended into the raft log,
+    //as the event has been replayed from the raft log, just cancel the timer related with the correlationId.
+    //because if not, it may conflict with the service module, because the service module will also
+    // replay the log and trigger the timerEvent again, I guess.
+    // TODO: why need to be cancelled ?
     void onReplayTimerEvent(final long correlationId)
     {
         if (!timerService.cancelTimerByCorrelationId(correlationId))
@@ -1426,6 +1440,16 @@ final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
         }
     }
 
+    /**
+     * called back from LogAdapter, where log is replayed from an older position in the raft log,
+     * and a SessionOpen message is received from the log.
+     * @param logPosition
+     * @param correlationId
+     * @param clusterSessionId
+     * @param timestamp
+     * @param responseStreamId
+     * @param responseChannel
+     */
     void onReplaySessionOpen(
         final long logPosition,
         final long correlationId,
@@ -1446,8 +1470,11 @@ final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
         }
     }
 
+    //Called back from LogAdapter, where the raft log is replayed from an old position,
+    //and a SessionClose message is received.
     void onReplaySessionClose(final long clusterSessionId, final CloseReason closeReason)
     {
+        //just remove the session and close related resources.
         final ClusterSession clusterSession = sessionByIdMap.remove(clusterSessionId);
         if (null != clusterSession)
         {
@@ -1456,6 +1483,8 @@ final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
         }
     }
 
+    //Called back from LogAdapter, where the raft log is replayed from an old position,
+    //and a ClusterAction message is received.
     void onReplayClusterAction(final long leadershipTermId, final ClusterAction action)
     {
         if (leadershipTermId == this.leadershipTermId)
@@ -1475,6 +1504,9 @@ final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
         }
     }
 
+    //Called back from LogAdapter, where the raft log is replayed from an old position,
+    //and a NewLeadershipTermEvent has been received,
+    // NewLeadershipTermEvent means a leader has been successfully elected and has begun a new term.
     void onReplayNewLeadershipTermEvent(
         final long leadershipTermId,
         final long logPosition,
@@ -1483,6 +1515,8 @@ final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
         final TimeUnit timeUnit,
         final int appVersion)
     {
+
+        //an empty method, maybe used in aeron-agent.
         logReplayNewLeadershipTermEvent(
             memberId,
             null != election,
@@ -1518,6 +1552,8 @@ final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
         }
     }
 
+    //Called back from LogAdapter, where the raft log is replayed from an old position,
+    //and a MembershipChange message is received.
     void onReplayMembershipChange(
         final long leadershipTermId,
         final long logPosition,
@@ -1719,7 +1755,7 @@ final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
 
     /**
      * Called back form Election.
-     *The node joins the cluster as the leader.
+     * The node joins the cluster as the leader.
      * @param logPosition the position the leader has consumed.
      */
     void joinLogAsLeader(
@@ -1805,6 +1841,16 @@ final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
         return false;
     }
 
+    /**
+     * Wait for the service module to join the log as the role specified in the param `role`.
+     * @param logChannel
+     * @param streamId
+     * @param logSessionId
+     * @param logPosition
+     * @param maxLogPosition
+     * @param isStartup
+     * @param role
+     */
     void awaitServicesReady(
         final String logChannel,
         final int streamId,
@@ -1823,7 +1869,7 @@ final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
             logSessionId,
             streamId,
             isStartup,
-            role,
+            role,   //the role that
             logChannel);
 
         //wait for service module to ack this position
@@ -1843,6 +1889,12 @@ final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
         ++serviceAckId;
     }
 
+    /**
+     * create a LogReplay that replay raft logs from logPosition to appendPosition.
+     * @param logPosition  startPosition of the log
+     * @param appendPosition endPosition of the log
+     * @return
+     */
     LogReplay newLogReplay(final long logPosition, final long appendPosition)
     {
         return new LogReplay(
@@ -1854,15 +1906,25 @@ final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
             ctx);
     }
 
+    /**
+     * poll raft logs that need to be replayed.
+     *
+     * @param logAdapter
+     * @param stopPosition position of the log where the replay should be stopped.
+     * @return
+     */
     int replayLogPoll(final LogAdapter logAdapter, final long stopPosition)
     {
         int workCount = 0;
 
+        // only poll when consensus module is in ACTIVE or SUSPENDED state.
         if (ConsensusModule.State.ACTIVE == state || ConsensusModule.State.SUSPENDED == state)
         {
+            //replay the raft logs
             final int fragments = logAdapter.poll(stopPosition);
             final long position = logAdapter.position();
 
+            // update commitPosition after replayed.
             if (fragments > 0)
             {
                 commitPosition.setOrdered(position);
@@ -1875,6 +1937,8 @@ final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
             workCount += fragments;
         }
 
+
+        //pull consensus message from service module.
         workCount += consensusModuleAdapter.poll();
 
         return workCount;

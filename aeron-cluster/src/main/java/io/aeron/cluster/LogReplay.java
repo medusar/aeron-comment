@@ -21,6 +21,9 @@ import io.aeron.cluster.client.ClusterException;
 import io.aeron.cluster.service.Cluster;
 import org.agrona.CloseHelper;
 
+/**
+ * replay logs for leader and follower nodes.
+ */
 final class LogReplay
 {
     private final long startPosition;
@@ -28,7 +31,9 @@ final class LogReplay
     private final int logSessionId;
     private final ConsensusModuleAgent consensusModuleAgent;
     private final ConsensusModule.Context ctx;
+
     private final LogAdapter logAdapter;
+
     private final Subscription logSubscription;
 
     LogReplay(
@@ -62,6 +67,7 @@ final class LogReplay
     {
         int workCount = 0;
 
+        //if logAdapter's image is null, then set the image and wait for service to join as follower.
         if (null == logAdapter.image())
         {
             final Image image = logSubscription.imageBySessionId(logSessionId);
@@ -75,6 +81,13 @@ final class LogReplay
                 }
 
                 logAdapter.image(image);
+
+                //wait for services to join the log as follower, and ack its position.
+                //it does not wait for the service module to replay all the logs,
+                //the logs in service module are replayed when doWork is called,
+                //and there is no state in service module, it just joins an active log from a position and poll the logs
+                //from that position.
+                //TODO: how to tell if a service finishes replaying old raft logs, by stopPosition ?
                 consensusModuleAgent.awaitServicesReady(
                     logSubscription.channel(),
                     logSubscription.streamId(),
@@ -82,21 +95,28 @@ final class LogReplay
                     startPosition,
                     stopPosition,
                     true,
-                    Cluster.Role.FOLLOWER);
+                    Cluster.Role.FOLLOWER);  //why as follower??
 
                 workCount += 1;
             }
         }
         else
         {
+            //replay the log in consensus module,
+            // because all the logs need to be handled both in consensus and service modules.
             workCount += consensusModuleAgent.replayLogPoll(logAdapter, stopPosition);
         }
 
         return workCount;
     }
 
+    /**
+     * check if the log replay process has finished.
+     * @return
+     */
     boolean isDone()
     {
+        //TODO: why can't be SNAPSHOT?
         return logAdapter.image() != null &&
             logAdapter.position() >= stopPosition &&
             consensusModuleAgent.state() != ConsensusModule.State.SNAPSHOT;

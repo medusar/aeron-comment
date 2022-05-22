@@ -66,6 +66,8 @@ class Election
 
     //position current node has consumed.
     private long logPosition;
+
+    //TODO: this should be archive position.
     private long appendPosition;
 
     private long catchupJoinPosition = NULL_POSITION;
@@ -591,6 +593,9 @@ class Election
         }
     }
 
+    //Called from ConsensusModuleAgent,
+    //it will only be called when a NewLeadershipTermEvent message is received from a raft log
+    // in the REPLAY state, for example: LEADER_REPLAY, FOLLOWER_REPLAY ..
     void onReplayNewLeadershipTermEvent(
         final long leadershipTermId,
         final long logPosition,
@@ -835,7 +840,8 @@ class Election
 
         if (null == logReplay)
         {
-            //if current consumed logPosition is less than appendPosition
+            //if current consumed logPosition is less than appendPosition(the recorded position in log)
+            // then create a logReplay instance, otherwise just go to state: LEADER_INIT.
             if (logPosition < appendPosition)
             {
                 logReplay = consensusModuleAgent.newLogReplay(logPosition, appendPosition);
@@ -847,12 +853,17 @@ class Election
 
             workCount++;
             isLeaderStartup = isNodeStartup;
+            //reset all th logPositions to -1, and wait for appendPosition requests.
             ClusterMember.resetLogPositions(clusterMembers, NULL_POSITION);
+
+            // update current member's logPosition to appendPosition.
             thisMember.leadershipTermId(leadershipTermId).logPosition(appendPosition);
         }
         else
         {
+            //logReplay instance already created, just do logReplay
             workCount += logReplay.doWork();
+            // if logReplay is finished, then set the node state to LEADER_INIT.
             if (logReplay.isDone())
             {
                 cleanupReplay();

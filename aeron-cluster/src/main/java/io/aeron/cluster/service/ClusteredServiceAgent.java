@@ -238,6 +238,8 @@ final class ClusteredServiceAgent implements Agent, Cluster, IdleStrategy
                 final int polled = logAdapter.poll(commitPosition.get());
                 workCount += polled;
 
+                //may need close. For example, if it finishes replaying a part of raft log(LEADER_REPLAY/FOLLOWER_REPLAY),
+                // or the role changed on this node.
                 if (0 == polled && logAdapter.isDone())
                 {
                     closeLog();
@@ -791,9 +793,13 @@ final class ClusteredServiceAgent implements Agent, Cluster, IdleStrategy
     //1. to set Image for logAdapter
     //2. to change role and memberId based on ActiveLogEvent
     //3. to disconnect or connect client sessions based on new role.
+    //The method will be called when:
+    //1) when node started with history raft logs, and the node goes into a REPLAY state,
+    // during which old raft logs will be replayed. In this state, the activeLog.maxLogPosition is set.
+    //2) when a node changes its role, because a leader for example. the activeLog.maxLogPosition is set to Long.MAX_VALUE.
     private void joinActiveLog(final ActiveLogEvent activeLog)
     {
-        //If current node is not leader, then close all the connected client sessions.
+        //If current node will not be the leader, then close all the connected client sessions.
         //ClientSessions are only allowed to connect to leader node.
         //Note: sessions will only be disconnected here but not removed yet. Removing is performed elsewhere.
         if (Role.LEADER != activeLog.role)
@@ -809,7 +815,6 @@ final class ClusteredServiceAgent implements Agent, Cluster, IdleStrategy
         try
         {
             //Wait for image to be ready.
-            //TODO: why need to wait ? how much time will it take?
             final Image image = awaitImage(activeLog.sessionId, logSubscription);
             if (image.joinPosition() != logPosition)
             {
@@ -826,7 +831,13 @@ final class ClusteredServiceAgent implements Agent, Cluster, IdleStrategy
 
             //setup for the logAdapter
             logAdapter.image(image);
+
+            //set the max position, so than when the position reaches, it is done. See: logAdapter.isDone
+            //when the joinActiveLog activity is trigger by a logReplay(in LEADER_REPLAY state for example),
+            //then the maxLogPosition is not -1.
             logAdapter.maxLogPosition(activeLog.maxLogPosition);
+
+            //set to null so that it will not be closed in the `finally` clause.
             logSubscription = null;
 
             //Acknowledge its logPosition to consensus-module. Retry until success.
@@ -839,8 +850,9 @@ final class ClusteredServiceAgent implements Agent, Cluster, IdleStrategy
         }
         finally
         {
-            //TODO:
-            //Why close? Will Image still be available after subscription closed ?
+            //Note: the image only be closed if an exception has been thrown
+            //because if code in `try` works normally, the `logSubscription` will be set to null,
+            // so the subscription will not be closed.
             CloseHelper.quietClose(logSubscription);
         }
 
@@ -855,7 +867,9 @@ final class ClusteredServiceAgent implements Agent, Cluster, IdleStrategy
             for (final ContainerClientSession session : sessionByIdMap.values())
             {
                 //ctx.isRespondingService() is normally true
-                //TODO: What does activeLog.isStartup means ?
+                //activeLog.isStartup means if current node is in starting up, which means the joinLog activity
+                // is triggered when the node is trying to start.
+                //so the session is only need to be connected when starts.
                 if (ctx.isRespondingService() && !activeLog.isStartup)
                 {
                     session.connect(aeron);
