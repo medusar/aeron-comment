@@ -84,7 +84,10 @@ final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
     private long serviceAckId = 0;
 
     private long terminationPosition = NULL_POSITION;
+
+    //commitPosition received from leader, when this node is follower.
     private long notifiedCommitPosition = 0;
+
     private long lastAppendPosition = 0;
     private long timeOfLastLogUpdateNs = 0;
     private long timeOfLastAppendPositionUpdateNs = 0;
@@ -870,6 +873,7 @@ final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
         }
     }
 
+    //Called back from ConsensusAdapter.
     void onAppendPosition(
         final long leadershipTermId,
         final long logPosition,
@@ -882,6 +886,7 @@ final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
         }
         else if (leadershipTermId <= this.leadershipTermId && Cluster.Role.LEADER == role)
         {
+            //update follower's logPosition
             final ClusterMember follower = clusterMemberByIdMap.get(followerMemberId);
             if (null != follower)
             {
@@ -893,6 +898,8 @@ final class ConsensusModuleAgent implements Agent, TimerService.TimerHandler
         }
     }
 
+    //Called back from ConsensusAdapter.
+    //The highest position reached by quorum of the cluster as determined by the leader.
     void onCommitPosition(final long leadershipTermId, final long logPosition, final int leaderMemberId)
     {
         logCommitPosition(leadershipTermId, logPosition, leaderMemberId, memberId);

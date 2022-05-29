@@ -127,6 +127,7 @@ public final class UdpChannel
     }
 
     /**
+     * TODO: canonicalForm..
      * Parse channel URI and create a {@link UdpChannel}.
      *
      * @param channelUriString to parse.

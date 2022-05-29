@@ -397,6 +397,7 @@ public final class NetworkPublication
      */
     public void onStatusMessage(final StatusMessageFlyweight msg, final InetSocketAddress srcAddress)
     {
+        //when SM message is received, update hasReceivers to true, then publication.isConnected can be updated.
         if (!hasReceivers)
         {
             hasReceivers = true;
@@ -408,6 +409,7 @@ public final class NetworkPublication
         }
 
         final long timeNs = cachedNanoClock.nanoTime();
+        //update last sm message time.
         timeOfLastStatusMessageNs = timeNs;
 
         senderLimit.setOrdered(flowControl.onStatusMessage(
@@ -418,6 +420,8 @@ public final class NetworkPublication
             positionBitsToShift,
             timeNs));
 
+        // UnicastFlowControl always returns true when `hasRequiredReceivers` is called.
+        //set isConnected to true.
         if (!isConnected && flowControl.hasRequiredReceivers())
         {
             LogBufferDescriptor.isConnected(metaDataBuffer, true);
@@ -506,6 +510,7 @@ public final class NetworkPublication
         final int activeTermId = computeTermIdFromPosition(senderPosition, positionBitsToShift, initialTermId);
         final int termOffset = (int)senderPosition & termLengthMask;
 
+        //hasInitialConnection: if setup message has been sent and SM message has received.
         if (!hasInitialConnection || isSetupElicited)
         {
             setupMessageCheck(nowNs, activeTermId, termOffset);
@@ -529,7 +534,9 @@ public final class NetworkPublication
             }
         }
 
+        //update receivers, based on timeout
         updateHasReceivers(nowNs);
+
         retransmitHandler.processTimeouts(nowNs, this);
 
         return bytesSent;
@@ -648,6 +655,7 @@ public final class NetworkPublication
 
     void updateHasReceivers(final long timeNs)
     {
+        //if SM message has not been received for more than `connectionTimeoutNs`, then  update hasReceivers to false.
         if (((timeOfLastStatusMessageNs + connectionTimeoutNs) - timeNs < 0) && hasReceivers)
         {
             hasReceivers = false;
@@ -696,6 +704,7 @@ public final class NetworkPublication
 
     private void setupMessageCheck(final long nowNs, final int activeTermId, final int termOffset)
     {
+        // 100ms timeout， then resend setup message, and update timeOfLastSetupNs.
         if ((timeOfLastSetupNs + PUBLICATION_SETUP_TIMEOUT_NS) - nowNs < 0)
         {
             timeOfLastSetupNs = nowNs;
@@ -901,6 +910,7 @@ public final class NetworkPublication
     }
 
     /**
+     * will be called every 1 second(default value)
      * {@inheritDoc}
      */
     public void onTimeEvent(final long timeNs, final long timeMs, final DriverConductor conductor)
@@ -909,13 +919,16 @@ public final class NetworkPublication
         {
             case ACTIVE:
             {
+                //will update isConnected status in LogBuffer.
                 updateConnectedStatus();
+
                 final long producerPosition = producerPosition();
                 publisherPos.setOrdered(producerPosition);
                 if (!isExclusive)
                 {
                     checkForBlockedPublisher(producerPosition, senderPosition.getVolatile(), timeNs);
                 }
+
                 checkUntetheredSubscriptions(timeNs, conductor);
                 break;
             }

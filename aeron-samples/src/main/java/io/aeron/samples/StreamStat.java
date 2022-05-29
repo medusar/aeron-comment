@@ -93,9 +93,7 @@ public final class StreamStat
                     }
                     else
                     {
-                        final int channelLength = Math.min(
-                            keyBuffer.getInt(CHANNEL_OFFSET, LITTLE_ENDIAN),
-                            MAX_CHANNEL_LENGTH);
+                        final int channelLength = Math.min(keyBuffer.getInt(CHANNEL_OFFSET, LITTLE_ENDIAN), MAX_CHANNEL_LENGTH);
                         channel = keyBuffer.getStringWithoutLengthAscii(CHANNEL_OFFSET + SIZE_OF_INT, channelLength);
                     }
 

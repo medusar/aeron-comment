@@ -88,7 +88,9 @@ public final class DriverConductor implements Agent
     private final ReceiverProxy receiverProxy;
     private final SenderProxy senderProxy;
     private final ClientProxy clientProxy;
+    //Will be wrapped into clientCommandAdapter.
     private final RingBuffer toDriverCommands;
+    //Wrap toDriverCommands inside, and be used to poll command from ClientConductor.
     private final ClientCommandAdapter clientCommandAdapter;
     private final ManyToOneConcurrentArrayQueue<Runnable> driverCmdQueue;
     private final Object2ObjectHashMap<String, SendChannelEndpoint> sendChannelEndpointByChannelMap =
@@ -212,7 +214,9 @@ public final class DriverConductor implements Agent
         trackTime(nowNs);
 
         int workCount = 0;
+        //check timers
         workCount += processTimers(nowNs);
+        //poll commands sent by ClientConductor.
         workCount += clientCommandAdapter.receive();
         workCount += driverCmdQueue.drain(Runnable::run, Configuration.COMMAND_DRAIN_LIMIT);
         workCount += trackStreamPositions(workCount, nowNs);
@@ -440,6 +444,8 @@ public final class DriverConductor implements Agent
         return null;
     }
 
+    //Called from ClientCommandAdapter
+    //Invoked when an ADD_PUBLICATION command is received and the channel is not IPC channel.
     void onAddNetworkPublication(
         final String channel,
         final int streamId,
@@ -453,6 +459,7 @@ public final class DriverConductor implements Agent
         validateEndpointForPublication(udpChannel);
         validateMtuForMaxMessage(params, channel);
 
+        //Reuse or create an SendChannelEndpoint.
         final SendChannelEndpoint channelEndpoint = getOrCreateSendChannelEndpoint(params, udpChannel, correlationId);
 
         NetworkPublication publication = null;
@@ -1250,10 +1257,15 @@ public final class DriverConductor implements Agent
         final int sessionId = params.hasSessionId ? params.sessionId : nextAvailableSessionId(streamId, canonicalForm);
         final int initialTermId = params.hasPosition ? params.initialTermId : BitUtil.generateRandomisedId();
 
+        //Determine flowControl based on channel with FlowControlSupplier.
+        //default unicast flow control supplier is `DefaultUnicastFlowControlSupplier`, which returns `UnicastFlowControl`
         final FlowControl flowControl = udpChannel.isMulticast() || udpChannel.isMultiDestination() ?
             ctx.multicastFlowControlSupplier().newInstance(udpChannel, streamId, registrationId) :
             ctx.unicastFlowControlSupplier().newInstance(udpChannel, streamId, registrationId);
+
+        //init flow control
         flowControl.initialize(ctx, udpChannel, initialTermId, params.termLength);
+
 
         final RawLog rawLog = newNetworkPublicationLog(sessionId, streamId, initialTermId, registrationId, params);
         UnsafeBufferPosition publisherPos = null;
@@ -1263,6 +1275,7 @@ public final class DriverConductor implements Agent
         AtomicCounter senderBpe = null;
         try
         {
+            //create positions.
             publisherPos = PublisherPos.allocate(
                 tempBuffer, countersManager, registrationId, sessionId, streamId, channel);
             publisherLmt = PublisherLimit.allocate(
@@ -1423,6 +1436,7 @@ public final class DriverConductor implements Agent
     private SendChannelEndpoint getOrCreateSendChannelEndpoint(
         final PublicationParams params, final UdpChannel udpChannel, final long registrationId)
     {
+
         SendChannelEndpoint channelEndpoint = findExistingSendChannelEndpoint(udpChannel);
         if (null == channelEndpoint)
         {
@@ -1443,6 +1457,8 @@ public final class DriverConductor implements Agent
                 validateMtuForSndbuf(
                     params, channelEndpoint.socketSndbufLength(), ctx, udpChannel.originalUriString(), null);
                 sendChannelEndpointByChannelMap.put(udpChannel.canonicalForm(), channelEndpoint);
+
+                //register endpoint to senderProxy, then the channel will opened.
                 senderProxy.registerSendChannelEndpoint(channelEndpoint);
             }
             catch (final Exception ex)
@@ -1525,6 +1541,7 @@ public final class DriverConductor implements Agent
             }
         }
 
+        //UdpChannel.canonicalForm
         SendChannelEndpoint endpoint = sendChannelEndpointByChannelMap.get(udpChannel.canonicalForm());
         if (null != endpoint && endpoint.udpChannel().hasTag() && udpChannel.hasTag() &&
             endpoint.udpChannel().tag() != udpChannel.tag())
@@ -2004,10 +2021,12 @@ public final class DriverConductor implements Agent
     {
         int workCount = 0;
 
+        //timer task, default: every 1 second.
         if (timerCheckDeadlineNs - nowNs < 0)
         {
             timerCheckDeadlineNs = nowNs + timerIntervalNs;
             heartbeatAndCheckTimers(nowNs);
+            
             checkForBlockedToDriverCommands(nowNs);
             workCount = 1;
         }

@@ -206,10 +206,11 @@ class Election
                 workCount += leaderInit(nowNs);
                 break;
 
+//                [Leader only] Leader is ready, and is awaiting followers to mark themselves FOLLOWER_READY
             case LEADER_READY:
                 workCount += leaderReady(nowNs);
                 break;
-
+            // [Follower only] Follower is replicating missing log entries from the leader
             case FOLLOWER_LOG_REPLICATION:
                 workCount += followerLogReplication(nowNs);
                 break;
@@ -883,6 +884,7 @@ class Election
         //join as leader
         consensusModuleAgent.joinLogAsLeader(leadershipTermId, logPosition, logSessionId, isLeaderStartup);
         updateRecordingLog(nowNs);
+
         state(LEADER_READY, nowNs);
 
         return 1;
@@ -897,6 +899,9 @@ class Election
         //Note: todo： the difference between consensusPublisher.newLeadershipTerm vs consensusModuleAgent.appendNewLeadershipTermEvent?
         workCount += publishNewLeadershipTermOnInterval(nowNs);
 
+        //Has the voting members of a cluster arrived at provided position in their log.
+        //OR: leaderHeartBeatTimeout
+        //OR: Has a quorum of members of appended a position to their local log.
         if (ClusterMember.hasVotersAtPosition(clusterMembers, logPosition, leadershipTermId) ||
             (nowNs >= (timeOfLastStateChangeNs + ctx.leaderHeartbeatTimeoutNs()) &&
             ClusterMember.hasQuorumAtPosition(clusterMembers, logPosition, leadershipTermId)))
@@ -1473,6 +1478,7 @@ class Election
 
     private void updateRecordingLog(final long nowNs)
     {
+        //add items in RecordingLog.
         ensureRecordingLogCoherent(leadershipTermId, logPosition, NULL_VALUE, nowNs);
         logLeadershipTermId = leadershipTermId;
     }

@@ -423,15 +423,25 @@ public final class MediaDriver implements AutoCloseable
         private boolean rejoinStream = Configuration.rejoinStream();
 
         private long lowStorageWarningThreshold = Configuration.lowStorageWarningThreshold();
+
+        //time interval for timer task.
         private long timerIntervalNs = Configuration.timerIntervalNs();
+
         private long clientLivenessTimeoutNs = Configuration.clientLivenessTimeoutNs();
         private long imageLivenessTimeoutNs = Configuration.imageLivenessTimeoutNs();
         private long publicationUnblockTimeoutNs = Configuration.publicationUnblockTimeoutNs();
+
+        // Timeout in nanoseconds after which a publication will be considered not connected if no status messages are received.
         private long publicationConnectionTimeoutNs = Configuration.publicationConnectionTimeoutNs();
+        // Time in nanoseconds a publication will linger once it is drained to recover potential tail loss.
         private long publicationLingerTimeoutNs = Configuration.publicationLingerTimeoutNs();
+
         private long untetheredWindowLimitTimeoutNs = Configuration.untetheredWindowLimitTimeoutNs();
         private long untetheredRestingTimeoutNs = Configuration.untetheredRestingTimeoutNs();
+
+        // Time in nanoseconds after which a status message will be sent if data is flowing slowly.
         private long statusMessageTimeoutNs = Configuration.statusMessageTimeoutNs();
+
         private long counterFreeToReuseTimeoutNs = Configuration.counterFreeToReuseTimeoutNs();
         private long retransmitUnicastDelayNs = Configuration.retransmitUnicastDelayNs();
         private long retransmitUnicastLingerNs = Configuration.retransmitUnicastLingerNs();

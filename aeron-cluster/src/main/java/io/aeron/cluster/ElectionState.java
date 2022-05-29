@@ -61,61 +61,75 @@ public enum ElectionState
 
     /**
      * Replay local log in preparation for new leadership term.
+     *  [Leader only] Leader is replaying the local log
      */
     LEADER_REPLAY(6),
 
     /**
      * Initialise state for new leadership term.
+     *  [Leader only] Leader is initialising internal state for new leadership term
      */
     LEADER_INIT(7),
 
     /**
      * Publish new leadership term and commit position, while awaiting followers ready.
+     * [Leader only] Leader is ready, and is awaiting followers to mark themselves FOLLOWER_READY.
      */
     LEADER_READY(8),
 
     /**
      * Replicate missing log entries from the leader.
+     *  [Follower only] Follower is replicating missing log entries from the leader
      */
     FOLLOWER_LOG_REPLICATION(9),
 
     /**
      * Replay local log in preparation for following new leader.
+     *  [Follower only] Follower is replaying the local log in preparing for following a new leader
      */
     FOLLOWER_REPLAY(10),
 
     /**
      * Initialise catch-up in preparation of receiving a replay from the leader to catch up in current term.
+     *  [Follower only] The node is preparing for receiving a replay from the leader to catch up in current term.
      */
     FOLLOWER_CATCHUP_INIT(11),
 
     /**
      * Await joining a replay from leader to catch-up.
+     *  [Follower only] The node is awaiting a join from the leader for catch up.
      */
     FOLLOWER_CATCHUP_AWAIT(12),
 
     /**
      * Catch-up to leader until live log can be added and merged.
+     * [Follower only] Follower is replaying the log in order to catch up to leader's live position and be able to join the live log
      */
     FOLLOWER_CATCHUP(13),
 
     /**
      * Initialise follower in preparation for joining the live log.
+     *  [Follower only] Follower is initializing internal state to join the live log on the leader
      */
     FOLLOWER_LOG_INIT(14),
 
     /**
      * Await joining the live log from the leader.
+     *  [Follower only] Follower's clustered service is processing the log,
+     *  and the consensus module is awaiting this in order to join the live log of the leader
      */
     FOLLOWER_LOG_AWAIT(15),
 
     /**
      * Publish append position to leader to signify ready for new term.
+     *  [Follower only] Follower is ready,
+     *  and published the append position to the leader to let the leader know the follower is ready for the new term
      */
     FOLLOWER_READY(16),
 
     /**
      * Election is closed after new leader is established.
+     * The election is closed
      */
     CLOSED(17);
 
