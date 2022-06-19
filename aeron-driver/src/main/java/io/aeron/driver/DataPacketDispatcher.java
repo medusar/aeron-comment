@@ -38,6 +38,7 @@ public final class DataPacketDispatcher
     enum SessionState
     {
         ACTIVE,
+        //
         PENDING_SETUP_FRAME,
         INIT_IN_PROGRESS,
         ON_COOL_DOWN,

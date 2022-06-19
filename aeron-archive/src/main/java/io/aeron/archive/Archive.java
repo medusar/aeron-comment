@@ -815,6 +815,7 @@ public final class Archive implements AutoCloseable
         private String replicationChannel = Configuration.replicationChannel();
 
         private long connectTimeoutNs = Configuration.connectTimeoutNs();
+        //5s
         private long replayLingerTimeoutNs = Configuration.replayLingerTimeoutNs();
         private long maxCatalogEntries = Configuration.maxCatalogEntries();
         private long catalogCapacity = Configuration.catalogCapacity();

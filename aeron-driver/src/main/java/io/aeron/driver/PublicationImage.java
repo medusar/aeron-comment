@@ -75,6 +75,7 @@ class PublicationImageReceiverFields extends PublicationImagePadding2
 {
     boolean isEndOfStream = false;
     long timeOfLastPacketNs;
+    //connections
     ImageConnection[] imageConnections = new ImageConnection[1];
 }
 
@@ -141,7 +142,9 @@ public final class PublicationImage
     private volatile State state = State.INIT;
 
     private final CachedNanoClock cachedNanoClock;
+
     private final ReceiveChannelEndpoint channelEndpoint;
+
     private final UnsafeBuffer[] termBuffers;
     private final Position hwmPosition;
     private final LossDetector lossDetector;
@@ -526,6 +529,7 @@ public final class PublicationImage
                 windowLength != nextSmReceiverWindowLength)
             {
                 cleanBufferTo(minSubscriberPosition - (termLengthMask + 1));
+                //schedule SM message
                 scheduleStatusMessage(minSubscriberPosition, windowLength);
                 workCount += 1;
             }
@@ -616,6 +620,7 @@ public final class PublicationImage
         int workCount = 0;
         final long changeNumber = endSmChange;
 
+        //if sm number changes or timeout: 200ms
         if (changeNumber != lastSmChangeNumber || (timeOfLastSmNs + smTimeoutNs) - nowNs < 0)
         {
             final long smPosition = nextSmPosition;
@@ -628,6 +633,7 @@ public final class PublicationImage
                 final int termId = computeTermIdFromPosition(smPosition, positionBitsToShift, initialTermId);
                 final int termOffset = (int)smPosition & termLengthMask;
 
+                //send SM message
                 channelEndpoint.sendStatusMessage(
                     imageConnections, sessionId, streamId, termId, termOffset, receiverWindowLength, (byte)0);
 
@@ -635,7 +641,9 @@ public final class PublicationImage
 
                 lastSmPosition = smPosition;
                 lastOverrunThreshold = smPosition + maxReceiverWindowLength;
+
                 lastSmChangeNumber = changeNumber;
+
                 timeOfLastSmNs = nowNs;
 
                 updateActiveTransportCount();

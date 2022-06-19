@@ -101,6 +101,8 @@ public final class Receiver implements Agent
 
         int workCount = commandQueue.drain(Runnable::run, Configuration.COMMAND_DRAIN_LIMIT);
 
+        //poll data from udp channel
+        //when a setup message is received, a publicationImage is created.
         final int bytesReceived = dataTransportPoller.pollTransports();
         totalBytesReceived.getAndAddOrdered(bytesReceived);
 
@@ -108,6 +110,7 @@ public final class Receiver implements Agent
         for (int lastIndex = publicationImages.length - 1, i = lastIndex; i >= 0; i--)
         {
             final PublicationImage image = publicationImages[i];
+
             if (image.isConnected(nowNs))
             {
                 workCount += image.sendPendingStatusMessage(nowNs);
@@ -290,6 +293,7 @@ public final class Receiver implements Agent
         {
             final PendingSetupMessageFromSource pending = pendingSetupMessages.get(i);
 
+            //1s
             if ((pending.timeOfStatusMessageNs() + PENDING_SETUPS_TIMEOUT_NS) - nowNs < 0)
             {
                 if (!pending.isPeriodic())

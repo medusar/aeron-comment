@@ -220,6 +220,7 @@ public final class DataTransportPoller extends UdpTransportPoller
                 }
                 else if (HDR_TYPE_SETUP == frameType)
                 {
+                    //setup message
                     channelEndpoint.onSetupMessage(
                         setupMessage, unsafeBuffer, length, srcAddress, channelAndTransport.transportIndex);
                 }

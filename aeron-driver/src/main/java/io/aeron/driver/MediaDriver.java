@@ -440,6 +440,7 @@ public final class MediaDriver implements AutoCloseable
         private long untetheredRestingTimeoutNs = Configuration.untetheredRestingTimeoutNs();
 
         // Time in nanoseconds after which a status message will be sent if data is flowing slowly.
+        // 200 ms
         private long statusMessageTimeoutNs = Configuration.statusMessageTimeoutNs();
 
         private long counterFreeToReuseTimeoutNs = Configuration.counterFreeToReuseTimeoutNs();
