@@ -20,8 +20,7 @@ import net.bytebuddy.asm.Advice;
 
 import java.util.concurrent.TimeUnit;
 
-import static io.aeron.agent.ClusterEventCode.ROLE_CHANGE;
-import static io.aeron.agent.ClusterEventCode.STATE_CHANGE;
+import static io.aeron.agent.ClusterEventCode.*;
 import static io.aeron.agent.ClusterEventLogger.LOGGER;
 
 class ClusterInterceptor
@@ -71,6 +70,7 @@ class ClusterInterceptor
             final int memberId,
             final int leaderId,
             final int logSessionId,
+            final int appVersion,
             final boolean isStartup)
         {
             LOGGER.logNewLeadershipTerm(
@@ -86,6 +86,7 @@ class ClusterInterceptor
                 memberId,
                 leaderId,
                 logSessionId,
+                appVersion,
                 isStartup);
         }
     }
@@ -261,6 +262,15 @@ class ClusterInterceptor
             final TimeUnit timeUnit)
         {
             LOGGER.logAppendSessionClose(memberId, sessionId, closeReason, leadershipTermId, timestamp, timeUnit);
+        }
+    }
+
+    static class DynamicJoinStateChange
+    {
+        @Advice.OnMethodEnter
+        static <E extends Enum<E>> void logStateChange(final E oldState, final E newState, final int memberId)
+        {
+            LOGGER.logStateChange(DYNAMIC_JOIN_STATE_CHANGE, oldState, newState, memberId);
         }
     }
 }
