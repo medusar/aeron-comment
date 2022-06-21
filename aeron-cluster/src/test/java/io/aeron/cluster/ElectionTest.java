@@ -16,6 +16,7 @@
 package io.aeron.cluster;
 
 import io.aeron.*;
+import io.aeron.cluster.client.ClusterException;
 import io.aeron.cluster.service.Cluster;
 import io.aeron.cluster.service.ClusterMarkFile;
 import io.aeron.exceptions.TimeoutException;
@@ -25,19 +26,20 @@ import org.agrona.collections.MutableLong;
 import org.agrona.concurrent.CountedErrorHandler;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.InOrder;
 import org.mockito.Mockito;
 
+import java.nio.file.Path;
 import java.util.Random;
 
 import static io.aeron.Aeron.NULL_VALUE;
 import static io.aeron.archive.client.AeronArchive.NULL_POSITION;
 import static io.aeron.cluster.ConsensusModuleAgent.APPEND_POSITION_FLAG_NONE;
 import static java.util.concurrent.TimeUnit.NANOSECONDS;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
 public class ElectionTest
@@ -676,6 +678,7 @@ public class ElectionTest
             term0Id,
             term1BaseLogPosition,
             term1BaseLogPosition,
+            term1BaseLogPosition,
             clusterMembers,
             clusterMemberByIdMap,
             thisMember,
@@ -788,6 +791,7 @@ public class ElectionTest
             term1Id,
             term1BaseLogPosition,
             term1BaseLogPosition,
+            term1BaseLogPosition,
             clusterMembers,
             clusterMemberByIdMap,
             thisMember,
@@ -866,6 +870,7 @@ public class ElectionTest
             term1Id,
             term1BaseLogPosition,
             term1BaseLogPosition,
+            term1BaseLogPosition,
             clusterMembers,
             clusterMemberByIdMap,
             thisMember,
@@ -925,6 +930,7 @@ public class ElectionTest
 
         final Election election = new Election(
             true,
+            0,
             0,
             0,
             0,
@@ -1041,6 +1047,7 @@ public class ElectionTest
             1,
             followerLogPosition,
             followerLogPosition,
+            followerLogPosition,
             clusterMembers,
             clusterMemberByIdMap,
             thisMember,
@@ -1098,6 +1105,7 @@ public class ElectionTest
             0,
             0,
             0,
+            0,
             clusterMembers,
             clusterMemberByIdMap,
             thisMember,
@@ -1150,6 +1158,161 @@ public class ElectionTest
     }
 
     @Test
+    void followerShouldUseInitialLeadershipTermIdAndInitialTermBaseLogPositionWhenRecordingLogIsEmpty()
+    {
+        final long initialLeadershipTermId = 2;
+        final long initialTermBaseLogPosition = 120;
+        final long snapshotLogPosition = 150;
+        final long leaderLeadershipTermId = 3;
+        final long leaderTermBaseLogPosition = 500;
+        final long leaderLogPosition = 600;
+        final long localRecordingId = 2390485;
+        final ClusterMember[] clusterMembers = prepareClusterMembers();
+        final ClusterMember thisMember = clusterMembers[1];
+        final ClusterMember liveLeader = clusterMembers[0];
+        final int leaderId = liveLeader.id();
+        final LogReplication logReplication = mock(LogReplication.class);
+
+        when(consensusModuleAgent.role()).thenReturn(Cluster.Role.FOLLOWER);
+
+        final Int2ObjectHashMap<ClusterMember> clusterMemberByIdMap = new Int2ObjectHashMap<>();
+        ClusterMember.addClusterMemberIds(clusterMembers, clusterMemberByIdMap);
+
+        final Election election = new Election(
+            false,
+            initialLeadershipTermId,
+            initialTermBaseLogPosition,
+            snapshotLogPosition,
+            snapshotLogPosition,
+            clusterMembers,
+            clusterMemberByIdMap,
+            thisMember,
+            consensusPublisher,
+            ctx,
+            consensusModuleAgent);
+
+        long t1 = 0;
+        election.doWork(++t1);
+        verify(electionStateCounter).setOrdered(ElectionState.CANVASS.code());
+
+        when(logReplication.isDone(anyLong())).thenReturn(true);
+        when(logReplication.recordingId()).thenReturn(localRecordingId);
+        when(consensusPublisher.appendPosition(any(), anyLong(), anyLong(), anyInt(), anyShort())).thenReturn(true);
+
+        election.onNewLeadershipTerm(
+            initialLeadershipTermId,
+            leaderLeadershipTermId,
+            leaderTermBaseLogPosition,
+            leaderLogPosition,
+            leaderLeadershipTermId,
+            leaderTermBaseLogPosition,
+            leaderLogPosition,
+            RECORDING_ID,
+            t1,
+            leaderId,
+            0,
+            false);
+
+        doReturn(logReplication).when(consensusModuleAgent)
+            .newLogReplication(any(), anyLong(), anyLong(), anyLong());
+        doReturn(leaderTermBaseLogPosition).when(logReplication).position();
+
+        election.doWork(++t1);
+        election.onCommitPosition(leaderLeadershipTermId, leaderTermBaseLogPosition, leaderId);
+        election.doWork(++t1);
+
+        verify(recordingLog).appendTerm(RECORDING_ID, initialLeadershipTermId, initialTermBaseLogPosition, t1);
+        verify(recordingLog).commitLogPosition(initialLeadershipTermId, leaderTermBaseLogPosition);
+    }
+
+    @Test
+    void followerShouldReplicateAndSendAppendPositionWhenLogReplicationDone()
+    {
+        final long leadershipTermId = 1;
+        final long leaderLogPosition = 120;
+        final long termBaseLogPosition = 60;
+        final long nextTermBaseLogPosition = 60;
+        final long localRecordingId = 2390485;
+        final MutableLong replicationPosition = new MutableLong(0);
+        final ClusterMember[] clusterMembers = prepareClusterMembers();
+        final ClusterMember thisMember = clusterMembers[1];
+        final ClusterMember liveLeader = clusterMembers[0];
+        final int leaderId = liveLeader.id();
+        final LogReplication logReplication = mock(LogReplication.class);
+
+        when(consensusModuleAgent.role()).thenReturn(Cluster.Role.FOLLOWER);
+
+        final Int2ObjectHashMap<ClusterMember> clusterMemberByIdMap = new Int2ObjectHashMap<>();
+        ClusterMember.addClusterMemberIds(clusterMembers, clusterMemberByIdMap);
+
+        final Election election = new Election(
+            true,
+            0,
+            0,
+            0,
+            0,
+            clusterMembers,
+            clusterMemberByIdMap,
+            thisMember,
+            consensusPublisher,
+            ctx,
+            consensusModuleAgent);
+
+        long t1 = 0;
+        election.doWork(++t1);
+        verify(electionStateCounter).setOrdered(ElectionState.CANVASS.code());
+
+        election.onNewLeadershipTerm(
+            0,
+            1,
+            nextTermBaseLogPosition,
+            NULL_POSITION,
+            leadershipTermId,
+            termBaseLogPosition,
+            leaderLogPosition,
+            RECORDING_ID,
+            t1,
+            leaderId,
+            0,
+            false);
+        verify(electionStateCounter).setOrdered(ElectionState.FOLLOWER_LOG_REPLICATION.code());
+
+        when(consensusModuleAgent.newLogReplication(any(), anyLong(), anyLong(), anyLong())).thenReturn(logReplication);
+        election.doWork(++t1);
+
+        verify(consensusModuleAgent, times(1)).newLogReplication(
+            liveLeader.archiveEndpoint(), RECORDING_ID, termBaseLogPosition, t1);
+
+        when(logReplication.recordingId()).thenReturn(localRecordingId);
+
+        when(logReplication.position()).then((invocation) -> replicationPosition.get());
+        // When replication is done we move the replication position.
+        when(logReplication.isDone(anyLong())).thenAnswer(
+            (invocation) ->
+            {
+                replicationPosition.set(nextTermBaseLogPosition);
+                return true;
+            });
+
+        when(consensusPublisher.appendPosition(any(), anyLong(), anyLong(), anyInt(), anyShort()))
+            .thenReturn(true);
+
+        t1 += ctx.leaderHeartbeatIntervalNs();
+        election.doWork(++t1);
+
+        verify(consensusPublisher).appendPosition(
+            liveLeader.publication(),
+            leadershipTermId,
+            nextTermBaseLogPosition, // Expect to be the position after the replication has completed.
+            thisMember.id(),
+            APPEND_POSITION_FLAG_NONE);
+
+        election.onCommitPosition(leadershipTermId, leaderLogPosition, leaderId);
+        election.doWork(++t1);
+        verify(electionStateCounter, times(2)).setOrdered(ElectionState.CANVASS.code());
+    }
+
+    @Test
     void leaderShouldMoveToLogReplicationThenWaitForCommitPosition()
     {
         final long leadershipTermId = 1;
@@ -1171,6 +1334,7 @@ public class ElectionTest
         final Election election = new Election(
             true,
             leadershipTermId,
+            leaderLogPosition,
             leaderLogPosition,
             leaderLogPosition,
             clusterMembers,
@@ -1245,6 +1409,159 @@ public class ElectionTest
         verify(electionStateCounter).setOrdered(ElectionState.LEADER_REPLAY.code());
     }
 
+    @ParameterizedTest
+    @CsvSource({
+        "0, 0, 4",
+        "2, 500, 4",
+        "100, 1000000, 200"
+    })
+    void shouldCreateInitialEmptyTermsWithAnEmptyRecordingLog(
+        final long initialLogLeadershipTermId,
+        final long initialTermBaseLogPosition,
+        final long leadershipTermId)
+    {
+        final long logPosition = initialTermBaseLogPosition + 500;
+        final long nowNs = 1_000_000;
+
+        doReturn(null).when(recordingLog).findLastTerm();
+
+        Election.ensureRecordingLogCoherent(
+            ctx,
+            RECORDING_ID,
+            initialLogLeadershipTermId,
+            initialTermBaseLogPosition,
+            leadershipTermId,
+            initialTermBaseLogPosition,
+            logPosition,
+            nowNs);
+
+        for (long termId = initialLogLeadershipTermId; termId < leadershipTermId; termId++)
+        {
+            verify(recordingLog).appendTerm(RECORDING_ID, termId, initialTermBaseLogPosition, nowNs);
+            verify(recordingLog).commitLogPosition(termId, initialTermBaseLogPosition);
+        }
+
+        verify(recordingLog).appendTerm(RECORDING_ID, leadershipTermId, initialTermBaseLogPosition, nowNs);
+        verify(recordingLog).commitLogPosition(leadershipTermId, logPosition);
+
+        verify(recordingLog, times(1)).force(ctx.fileSyncLevel());
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+        "0, 0, 4",
+        "2, 500, 4",
+        "100, 1000000, 200"
+    })
+    void shouldBackFillEmptyLeadershipTermsInANonemptyRecordingLog(
+        final long initialLogLeadershipTermId,
+        final long initialTermBaseLogPosition,
+        final long leadershipTermId,
+        @TempDir final Path tempDir)
+    {
+        final long termBaseLogPosition = initialTermBaseLogPosition + 100;
+        final long logPosition = initialTermBaseLogPosition + 500;
+        final long nowNs = 1_000_000;
+
+        final RecordingLog log = new RecordingLog(tempDir.toFile(), true);
+        ctx.recordingLog(log);
+
+        log.appendTerm(RECORDING_ID, initialLogLeadershipTermId, initialTermBaseLogPosition, nowNs);
+
+        Election.ensureRecordingLogCoherent(
+            ctx,
+            RECORDING_ID,
+            initialLogLeadershipTermId,
+            initialTermBaseLogPosition,
+            leadershipTermId,
+            termBaseLogPosition,
+            logPosition,
+            nowNs);
+
+        for (long termId = initialLogLeadershipTermId + 1; termId < leadershipTermId; termId++)
+        {
+            final RecordingLog.Entry termEntry = log.findTermEntry(termId);
+            assertNotNull(termEntry);
+            assertEquals(termBaseLogPosition, termEntry.termBaseLogPosition);
+            assertEquals(termBaseLogPosition, termEntry.logPosition);
+        }
+
+        final RecordingLog.Entry termEntry = log.findTermEntry(leadershipTermId);
+        assertNotNull(termEntry);
+        assertEquals(termBaseLogPosition, termEntry.termBaseLogPosition);
+        assertEquals(logPosition, termEntry.logPosition);
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+        "0, 0, 4",
+        "2, 500, 4",
+        "100, 1000000, 200"
+    })
+    void shouldCompleteExistingTerm(
+        final long initialLogLeadershipTermId,
+        final long initialTermBaseLogPosition,
+        final long leadershipTermId,
+        @TempDir final Path tempDir)
+    {
+        final long termBaseLogPosition = initialTermBaseLogPosition + 100;
+        final long logPosition = initialTermBaseLogPosition + 500;
+        final long nowNs = 1_000_000;
+
+        final RecordingLog log = new RecordingLog(tempDir.toFile(), true);
+        ctx.recordingLog(log);
+
+        log.appendTerm(RECORDING_ID, leadershipTermId, termBaseLogPosition, nowNs);
+
+        Election.ensureRecordingLogCoherent(
+            ctx,
+            RECORDING_ID,
+            initialLogLeadershipTermId,
+            initialTermBaseLogPosition,
+            leadershipTermId,
+            termBaseLogPosition,
+            logPosition,
+            nowNs);
+
+        final RecordingLog.Entry termEntry = log.findTermEntry(leadershipTermId);
+        assertEquals(termBaseLogPosition, termEntry.termBaseLogPosition);
+        assertEquals(logPosition, termEntry.logPosition);
+
+        assertEquals(1, log.entries().size());
+    }
+
+    @Test
+    void shouldThrowIfLastTermIsUnfinishedAndTermBaseLogPositionIsNotSpecified(@TempDir final Path tempDir)
+    {
+        final long leadershipTermId = 4;
+        final long logPosition = 500;
+        final long nowNs = 1_000_000;
+
+        final RecordingLog log = new RecordingLog(tempDir.toFile(), true);
+        ctx.recordingLog(log);
+
+        log.appendTerm(RECORDING_ID, leadershipTermId - 1, 0, nowNs);
+
+        assertThrows(ClusterException.class, () -> Election.ensureRecordingLogCoherent(
+            ctx,
+            RECORDING_ID,
+            0,
+            0,
+            leadershipTermId,
+            NULL_POSITION,
+            logPosition,
+            nowNs));
+    }
+
+    @Test
+    void shouldThrowNonZeroLogPositionAndNullRecordingIdSpecified()
+    {
+        Election.ensureRecordingLogCoherent(ctx, NULL_POSITION, 0, 0, 0, 0, 0, 1);
+        Election.ensureRecordingLogCoherent(ctx, NULL_POSITION, 0, 0, 0, 0, 1000, 1);
+
+        verifyNoInteractions(recordingLog);
+    }
+
     private Election newElection(
         final boolean isStartup,
         final long logLeadershipTermId,
@@ -1259,6 +1576,7 @@ public class ElectionTest
         return new Election(
             isStartup,
             logLeadershipTermId,
+            logPosition,
             logPosition,
             logPosition,
             clusterMembers,
@@ -1282,6 +1600,7 @@ public class ElectionTest
         return new Election(
             true,
             logLeadershipTermId,
+            logPosition,
             logPosition,
             logPosition,
             clusterMembers,
